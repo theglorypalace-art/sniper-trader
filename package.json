@@ -1,0 +1,16 @@
+{
+  "name": "pumpfun-sniper-bot",
+  "version": "1.0.0",
+  "description": "Detects new pump.fun token launches on Solana, buys a small % of capital, and auto-sells at a take-profit target. DRY_RUN by default.",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@solana/web3.js": "^1.95.3",
+    "bs58": "^6.0.0",
+    "dotenv": "^16.4.5",
+    "ws": "^8.18.0"
+  }
+}

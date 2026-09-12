@@ -1,7 +1,7 @@
 {
-  "name": "pumpfun-sniper-bot",
-  "version": "1.0.0",
-  "description": "Detects new pump.fun token launches on Solana, buys a small % of capital, and auto-sells at a take-profit target. DRY_RUN by default.",
+  "name": "memecoin-scanner",
+  "version": "2.0.0",
+  "description": "Monitors new meme coin launches on Solana (pump.fun) and BNB Smart Chain (PancakeSwap), scores each with a risk engine (dev %, holder concentration, honeypot/tax checks, LP lock, migration status), and only recommends/trades the small, very selective subset that passes — max N per day. DRY_RUN by default.",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
@@ -11,6 +11,7 @@
     "@solana/web3.js": "^1.95.3",
     "bs58": "^6.0.0",
     "dotenv": "^16.4.5",
+    "ethers": "^6.13.4",
     "ws": "^8.18.0"
   }
 }

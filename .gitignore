@@ -1,3 +1,4 @@
 node_modules/
 .env
 trades.log
+daily-limit-state.json

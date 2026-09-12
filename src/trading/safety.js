@@ -6,6 +6,12 @@ const { SOL_MINT } = require('../config');
 // malicious token can still add sell restrictions dynamically), but a
 // token that can't even be quoted for a sell right now is an immediate,
 // strong red flag — do not buy it.
+//
+// This is now just one input into the full risk engine
+// (src/analysis/riskEngine.js), which also checks holder concentration,
+// dev wallet %, mint/freeze authority, LP lock status, and pump.fun curve
+// status. Nothing in positionManager.js calls this directly anymore —
+// riskEngine.js does.
 async function canSell(mint, testAmountRaw = 1000) {
   try {
     const quote = await getQuote(mint, SOL_MINT, testAmountRaw);
@@ -15,15 +21,4 @@ async function canSell(mint, testAmountRaw = 1000) {
   }
 }
 
-// Extend this over time — e.g. checking mint/freeze authority via
-// getParsedAccountInfo, holder concentration, or a rug-check API. This is
-// intentionally a minimal starting point, not a complete safety net.
-async function runSafetyChecks(mint) {
-  const sellable = await canSell(mint);
-  if (!sellable) {
-    return { safe: false, reason: 'No sell route found (possible honeypot or dead liquidity).' };
-  }
-  return { safe: true, reason: null };
-}
-
-module.exports = { canSell, runSafetyChecks };
+module.exports = { canSell };

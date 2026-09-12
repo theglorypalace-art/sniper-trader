@@ -1,25 +1,71 @@
-# pump.fun Sniper Bot
+# Meme Coin Scanner (Solana + BNB Smart Chain)
 
-Detects new token launches on pump.fun (Solana), buys a small % of wallet
-capital, and auto-sells at a take-profit target (with an optional
-stop-loss and max-hold-time safety net).
+Watches for new meme coin launches on **Solana (pump.fun)** and **BNB Smart
+Chain (PancakeSwap)**, runs every one through a risk engine (dev/creator
+holding %, holder concentration, honeypot/tax checks, LP lock status,
+pump.fun migration/curve status), and only recommends the small, very
+selective subset that passes — **at most `MAX_TOKENS_PER_DAY` per day**
+(default 5, across both chains combined).
 
 **Every meme-coin risk that applies to this category of trading still
-applies here.** This bot does not remove that risk — it just automates
-the mechanics. Most new token launches go to zero. Read this whole README
-before touching real funds.
+applies here.** The risk engine filters out the *obvious, checkable*
+red flags — it does not, and cannot, guarantee a "LOW risk" token won't
+still go to zero. Liquidity can be pulled after purchase, wallets that
+looked distributed can turn out to be linked, and no automated check
+replaces your own judgment. Read this whole README before touching real
+funds.
+
+## A note on "Axiom.trade compatible"
+
+Axiom.Trade has no official public developer API. The unofficial
+third-party SDKs that exist log into your real Axiom account and use
+browser automation to get past Cloudflare's bot protection — that's a
+real account-security and ToS risk, not something this project wires up.
+
+Instead, this scanner is a **standalone analyzer + (optional) auto-trader**
+that works independently of Axiom. When a token is recommended, its
+contract address and full findings are printed/logged immediately — you
+can paste that CA into Axiom (or any other terminal) yourself, or let the
+bot execute the trade directly (see "Execution speed" below).
 
 ## How it works
 
-1. Subscribes to pump.fun's on-chain program logs via Helius's WebSocket RPC
-2. On a new token creation, resolves the actual mint address from the transaction
-3. Runs a safety check (confirms the token can actually be sold — rejects likely honeypots)
-4. Buys `CAPITAL_PCT`% of your wallet's SOL balance (capped at `MAX_POSITION_SOL`)
-5. Polls the price every `PRICE_POLL_INTERVAL_MS` and sells when:
-   - price is up `TAKE_PROFIT_PCT`% (default 25%), or
-   - price is down `STOP_LOSS_PCT`% (default -50%, disable by leaving unset), or
-   - the position has been open longer than `MAX_POSITION_AGE_MS` (default 30 min)
-6. Every trade attempt — bought, sold, skipped, or failed — is appended to `trades.log`
+1. **Detection**
+   - Solana: subscribes to pump.fun's on-chain program logs via Helius's WebSocket RPC.
+   - BSC: subscribes to PancakeSwap V2's `PairCreated` events, filtered to WBNB-paired pools.
+2. **Risk assessment** (`src/analysis/riskEngine.js`) — for every single token seen, not just the ones that pass:
+   - Can it actually be sold right now? (Solana: live Jupiter quote. BSC: GoPlus honeypot flag + buy/sell tax.)
+   - Dev/creator wallet holding % and top-10 holder concentration.
+   - Mint/freeze authority still active? Ownership hidden or reclaimable?
+   - LP burned/locked %.
+   - Solana only: bonding curve progress and migration status, read directly on-chain (not from an unofficial API) — tags a token `new`, `developing`, `final_stretch` (close to migrating to Raydium), or `migrated`.
+   - Broadly-distributed holdings with no dominant dev wallet get flagged as a **community coin**.
+3. **Scoring** — each token gets a 0-100 risk score → **LOW / MEDIUM / HIGH / CRITICAL**. Only LOW/MEDIUM are ever tradeable; anything else is rejected outright regardless of the daily quota.
+4. **Daily selectivity gate** (`src/analysis/dailyLimiter.js`) — even a LOW-risk token only gets recommended if today's `MAX_TOKENS_PER_DAY` quota isn't already used. Resets at UTC midnight.
+5. **Instant feedback** — every token evaluated gets an immediate console log + `trades.log` entry: contract address, chain, category, risk verdict, every reason behind the score, and (if recommended) the suggested take-profit / stop-loss / max-hold-time.
+6. **Execution** (if `DRY_RUN=false`) — buys `CAPITAL_PCT`% (or `BSC_CAPITAL_PCT`%) of that chain's wallet balance, capped at `MAX_POSITION_SOL` / `BSC_MAX_POSITION_BNB`, and polls price to auto-sell at the risk-tier's take-profit/stop-loss/max-hold.
+
+### Execution speed vs. manual alerts
+
+This intentionally does **not** route recommendations through Telegram or
+any other manual-approval step before trading. Any human-in-the-loop relay
+is exactly where slippage creeps in on fast-moving launches — by the time
+you read an alert and tap buy, the entry is gone. If `DRY_RUN=false`, the
+bot buys the moment a token is recommended and sells the moment its exit
+condition is hit. The full findings are still logged instantly for your
+own visibility — they just don't gate execution.
+
+### Suggested "very safe" exit plan by risk tier
+
+| Tier | Take-profit | Stop-loss | Max hold |
+|---|---|---|---|
+| LOW | +20% | -25% | 20 min |
+| MEDIUM | +15% | -30% | 12 min |
+
+These are conservative on purpose — a small, reliably-taken profit and a
+fast, forced exit if it isn't working, rather than swinging for a bigger
+number. Tune them in `src/analysis/riskEngine.js` (`exitPlanFor`) once you
+have real DRY_RUN data to work from.
 
 ## Setup
 
@@ -28,30 +74,36 @@ npm install
 cp .env.example .env
 ```
 
-1. Sign up at [helius.dev](https://helius.dev), create an API key, put it in `.env` as `HELIUS_API_KEY`
-2. Leave `DRY_RUN=true` and run `npm start` — watch the console and `trades.log`. No real transactions are sent in this mode; the bot logs exactly what it *would* have done.
-3. Only once you've watched dry-run behavior for a while and trust it:
-   - Create a **brand new, dedicated** Solana wallet — never your main wallet
-   - Fund it with a small amount you are fully prepared to lose entirely
-   - Export its private key in base58 format, put it in `.env` as `WALLET_PRIVATE_KEY`
-   - Set `DRY_RUN=false`
+1. **Solana**: sign up at [helius.dev](https://helius.dev), create an API key, put it in `.env` as `HELIUS_API_KEY`.
+2. **BSC** (optional): set `ENABLE_BSC=true`. The default public RPC (`bsc-rpc.publicnode.com`) works for testing; get a dedicated key before trading real funds.
+3. Leave `DRY_RUN=true` and run `npm start` — watch the console and `trades.log`. No real transactions are sent in this mode; every buy/sell is simulated and logged exactly as it would have happened.
+4. Only once you've watched dry-run behavior for a while and trust it:
+   - Create **brand new, dedicated** wallets — never your main wallet — one per chain you enable.
+   - Fund each with a small amount you are fully prepared to lose entirely.
+   - Solana: export the private key in base58 format → `WALLET_PRIVATE_KEY`.
+   - BSC: export the private key in hex (`0x...`) format → `BSC_WALLET_PRIVATE_KEY`.
+   - Set `DRY_RUN=false`.
 
 ## What this does NOT protect you from
 
-- **Rug pulls that happen after purchase** — the safety check confirms the token is sellable *right now*, not that it will remain sellable, or that liquidity won't be pulled the moment after you buy.
-- **Losing races to faster bots/infrastructure** — dedicated sniping services run infrastructure this project doesn't attempt to match (colocated nodes, MEV relationships). Expect to lose the best entries to them regularly.
-- **Slippage on exit** — `SLIPPAGE_BPS` (default 5%) is a buffer, not a guarantee; thin liquidity can still cause a worse fill than expected, especially in a rush to exit.
-- **Wash-traded or fake-looking activity** — this bot buys purely based on "a new token launched," with no attempt to judge community/social legitimacy.
+- **Rug pulls that happen after purchase** — every check here confirms the token looks sellable and reasonably distributed *right now*, not that it will stay that way.
+- **Losing races to faster bots/infrastructure** — dedicated sniping services run infrastructure this project doesn't attempt to match (colocated nodes, MEV relationships, private mempools).
+- **Slippage on exit** — `SLIPPAGE_BPS`/`BSC_SLIPPAGE_BPS` are buffers, not guarantees; thin liquidity can still produce a worse fill than expected.
+- **GoPlus/on-chain data being wrong, stale, or unavailable** — the risk engine scores conservatively when a lookup fails, but "conservative" isn't the same as "safe."
+- **Wash-traded or fake-looking community activity** — "community coin" here means holdings look distributed, not that the community itself is genuine.
 
 ## Known limitations / things to verify before trusting this
 
-- **Log-string detection is brittle.** The detector looks for the literal string `"Instruction: Create"` in pump.fun's program logs. If pump.fun upgrades their program, this string or the whole log format could change silently. Verify this against a real, current pump.fun transaction on a Solana explorer before relying on it.
-- **`PUMPFUN_PROGRAM_ID` in `src/config.js`** is pump.fun's known mainnet program ID as of this build — confirm it's still current before going live.
-- **Jupiter API version** — this targets Jupiter's v6 quote/swap endpoints. Check [station.jup.ag](https://station.jup.ag/docs) for the current API version before relying on it; aggregator APIs do get versioned/deprecated over time.
-- **None of this has been tested against live Solana mainnet from the environment this was built in** (sandboxed, no external network access to Solana/Helius/Jupiter). Syntax and module wiring were verified; live on-chain behavior was not. Test extensively in `DRY_RUN=true` and then with trivial real amounts before trusting it with anything meaningful.
+- **pump.fun log-string detection is brittle.** The Solana detector looks for the literal string `"Instruction: Create"` in pump.fun's program logs — verify against a real, current transaction before relying on it.
+- **`PUMPFUN_PROGRAM_ID`** and the bonding-curve account layout (`src/analysis/pumpfunCurve.js`) are current as of this build, sourced from pump-fun's own public docs repo — pump.fun has changed this account's fields before (e.g. adding a `creator` field) and could again.
+- **Jupiter v6 and PancakeSwap V2 APIs** — check their current docs before relying on either long-term.
+- **GoPlus Solana endpoint is explicitly labeled "beta"** by GoPlus themselves — expect rougher coverage than the mature EVM endpoint.
+- **BSC detection only catches WBNB-paired pools.** Pairs quoted against BUSD/USDT etc. are skipped — widen `src/bsc/detector.js` if you want those too.
+- **None of this has been tested against live mainnet from the environment this was built in** (sandboxed, no external network access to Solana/BSC/Helius/GoPlus/Jupiter/PancakeSwap). Syntax and module wiring were verified; live on-chain behavior was not. Test extensively in `DRY_RUN=true`, then with trivial real amounts, before trusting it with anything meaningful.
 
 ## Extending this
 
-- `MAX_CONCURRENT_POSITIONS` currently limits the bot to one open position at a time — raise carefully, since each position needs its own price-polling loop and capital.
-- No holder-concentration, dev-wallet, or social-signal checks exist yet — `src/trading/safety.js` is intentionally minimal and is the place to add more rug-detection heuristics over time.
-- No Telegram/UI layer exists — everything runs from `trades.log` and console output. A dashboard or Telegram notifier could be layered on top the same way the Hyperliquid bot has one.
+- `MAX_CONCURRENT_POSITIONS` / `BSC_MAX_CONCURRENT_POSITIONS` currently limit each chain to one open position at a time — raise carefully, since each position needs its own price-polling loop and capital.
+- The risk engine's scoring weights and hard-reject thresholds live in `src/analysis/riskEngine.js` — tune them as you gather real data on what actually correlates with rugs vs. genuine plays.
+- `daily-limit-state.json` (git-ignored) tracks today's used quota — delete it to reset manually, or just wait for UTC midnight.
+- No Telegram/dashboard notifier exists yet — everything runs from `trades.log` and console output, by design (see "Execution speed" above). A read-only notifier that mirrors the console output elsewhere (without gating execution) would be a safe addition.

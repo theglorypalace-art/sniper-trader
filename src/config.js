@@ -73,5 +73,21 @@ module.exports = {
   PRICE_POLL_INTERVAL_MS: Number(process.env.PRICE_POLL_INTERVAL_MS || 4000),
 
   // How selective the scanner is — max tokens recommended/traded per UTC day.
+  // (Fallback only if Supabase isn't configured — see src/live/liveConfig.js.)
   MAX_TOKENS_PER_DAY: Number(process.env.MAX_TOKENS_PER_DAY || 5),
+
+  // ---- Live control layer (optional but recommended for 24/7 operation) ----
+  // Without these, the bot still runs fine on static .env config — you
+  // just lose live filter updates and the dashboard/Telegram feed.
+  // Get URL + service_role key from Supabase project settings > API.
+  // Use the service_role key here (server-side only, never expose it to a
+  // browser/dashboard — the dashboard should use the anon key instead).
+  SUPABASE_URL: process.env.SUPABASE_URL || null,
+  SUPABASE_SERVICE_KEY: process.env.SUPABASE_SERVICE_KEY || null,
+
+  // Create a bot via @BotFather on Telegram to get this token.
+  TELEGRAM_BOT_TOKEN: process.env.TELEGRAM_BOT_TOKEN || null,
+  // Your personal chat ID — the bot prints this when you send it /start.
+  // Leave blank during setup, then lock it down once you have it.
+  TELEGRAM_CHAT_ID: process.env.TELEGRAM_CHAT_ID || null,
 };

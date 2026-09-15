@@ -3,6 +3,12 @@
 // migrated / developing), a community-coin flag, and a suggested exit plan
 // (take-profit / stop-loss / max hold time).
 //
+// Several thresholds here (max dev %, max top-10 %, minimum tier that
+// counts as "recommended", daily quota) are read from live config
+// (src/live/liveConfig.js) instead of being hardcoded, so they can be
+// changed from Telegram/the dashboard without a redeploy. If Supabase
+// isn't configured, liveConfig falls back to sane static defaults.
+//
 // This is a heuristic filter, not a guarantee. A "LOW risk" verdict means
 // the obvious, checkable rug patterns weren't found right now — it does
 // not mean the token can't still go to zero. Liquidity can be pulled,
@@ -11,6 +17,7 @@ const { getSolanaTokenSecurity, getEvmTokenSecurity } = require('./goplus');
 const { getBondingCurveState, curveProgressPct } = require('./pumpfunCurve');
 const { canSell } = require('../trading/safety');
 const { tryConsumeDailySlot } = require('./dailyLimiter');
+const { getConfig } = require('../live/liveConfig');
 
 const RISK_TIERS = [
   { max: 25, label: 'LOW' },
@@ -43,9 +50,6 @@ function reject(chain, address, reason) {
 }
 
 function exitPlanFor(tier) {
-  // Conservative on purpose — tight, fast exits over swinging for a bigger
-  // number. "Very safe" here means small, reliably-taken profit and a
-  // stop-loss/max-hold that gets you out quickly if it's not working.
   switch (tier) {
     case 'LOW':
       return { takeProfitPct: 20, stopLossPct: -25, maxHoldMs: 20 * 60 * 1000 };
@@ -63,7 +67,7 @@ function finalize(input) {
     ...input,
     verdict: tier,
     tradeable,
-    recommended: false, // set by assessAndGate once the daily quota is checked
+    recommended: false, // set by assessAndGate once the live-config gate + daily quota are checked
     exit: tradeable ? exitPlanFor(tier) : null,
   };
 }
@@ -71,6 +75,9 @@ function finalize(input) {
 // -------------------- Solana / pump.fun --------------------
 
 async function assessSolanaToken(mint) {
+  const cfg = getConfig();
+  const maxDevPercent = cfg.maxDevPercent ?? 30;
+  const maxTop10Percent = cfg.maxTop10Percent ?? 70;
   const reasons = [];
   let score = 0;
 
@@ -101,9 +108,7 @@ async function assessSolanaToken(mint) {
     }
     if (Array.isArray(sec.holders) && sec.holders.length) {
       top10Percent = sec.holders.reduce((sum, h) => sum + Number(h.percent || 0), 0) * 100;
-      const creatorHolder = sec.holders.find((h) =>
-        /creator|deployer/i.test(h.tag || '')
-      );
+      const creatorHolder = sec.holders.find((h) => /creator|deployer/i.test(h.tag || ''));
       if (creatorHolder) devPercent = Number(creatorHolder.percent || 0) * 100;
     }
     if (Array.isArray(sec.dex) && sec.dex.length) {
@@ -112,8 +117,8 @@ async function assessSolanaToken(mint) {
   }
 
   if (devPercent != null) {
-    if (devPercent > 30) {
-      return reject('solana', mint, `Creator/dev wallet holds ~${devPercent.toFixed(1)}% of supply — extreme dump risk.`);
+    if (devPercent > maxDevPercent) {
+      return reject('solana', mint, `Creator/dev wallet holds ~${devPercent.toFixed(1)}% of supply — over the ${maxDevPercent}% limit.`);
     }
     score += Math.min(40, devPercent * 2);
     reasons.push(`Dev/creator wallet holds ~${devPercent.toFixed(1)}% of supply.`);
@@ -123,8 +128,8 @@ async function assessSolanaToken(mint) {
   }
 
   if (top10Percent != null) {
-    if (top10Percent > 70) {
-      return reject('solana', mint, `Top 10 holders control ~${top10Percent.toFixed(1)}% of supply.`);
+    if (top10Percent > maxTop10Percent) {
+      return reject('solana', mint, `Top 10 holders control ~${top10Percent.toFixed(1)}% of supply — over the ${maxTop10Percent}% limit.`);
     }
     if (top10Percent > 20) score += Math.min(25, top10Percent - 20);
     reasons.push(`Top 10 holders control ~${top10Percent.toFixed(1)}% of supply.`);
@@ -173,6 +178,9 @@ async function assessSolanaToken(mint) {
 // -------------------- BNB Smart Chain / PancakeSwap --------------------
 
 async function assessBscToken(address) {
+  const cfg = getConfig();
+  const maxDevPercent = cfg.maxDevPercent ?? 30;
+  const maxTop10Percent = cfg.maxTop10Percent ?? 70;
   const reasons = [];
   let score = 0;
 
@@ -193,7 +201,7 @@ async function assessBscToken(address) {
     return reject('bsc', address, 'Contract can prevent holders from selling all of their tokens in one go.');
   }
   if (sec.is_open_source === '0') {
-    return reject('bsc', address, 'Contract is not verified/open-source — can\'t assess it further.');
+    return reject('bsc', address, "Contract is not verified/open-source — can't assess it further.");
   }
   if (sec.selfdestruct === '1') {
     return reject('bsc', address, 'Contract has a self-destruct function.');
@@ -214,8 +222,8 @@ async function assessBscToken(address) {
 
   const devPercent = sec.owner_percent != null && sec.owner_percent !== '' ? Number(sec.owner_percent) * 100 : null;
   if (devPercent != null) {
-    if (devPercent > 30) {
-      return reject('bsc', address, `Owner wallet holds ~${devPercent.toFixed(1)}% of supply.`);
+    if (devPercent > maxDevPercent) {
+      return reject('bsc', address, `Owner wallet holds ~${devPercent.toFixed(1)}% of supply — over the ${maxDevPercent}% limit.`);
     }
     score += Math.min(40, devPercent * 2);
     reasons.push(`Owner/dev wallet holds ~${devPercent.toFixed(1)}% of supply.`);
@@ -226,8 +234,8 @@ async function assessBscToken(address) {
 
   const holders = Array.isArray(sec.holders) ? sec.holders : [];
   const top10Percent = holders.reduce((sum, h) => sum + Number(h.percent || 0), 0) * 100;
-  if (top10Percent > 70) {
-    return reject('bsc', address, `Top 10 holders control ~${top10Percent.toFixed(1)}% of supply.`);
+  if (top10Percent > maxTop10Percent) {
+    return reject('bsc', address, `Top 10 holders control ~${top10Percent.toFixed(1)}% of supply — over the ${maxTop10Percent}% limit.`);
   }
   if (top10Percent > 20) score += Math.min(25, top10Percent - 20);
   if (holders.length) reasons.push(`Top 10 holders control ~${top10Percent.toFixed(1)}% of supply.`);
@@ -269,7 +277,7 @@ async function assessBscToken(address) {
     address,
     score,
     reasons,
-    category: 'new', // detection fires at pair-creation, so every hit is "new" by construction
+    category: 'new',
     isCommunityCoin,
     devPercent,
     top10Percent,
@@ -278,19 +286,25 @@ async function assessBscToken(address) {
   });
 }
 
-// Runs the full assessment AND applies the "very selective, max N/day"
-// gate. Only tokens that are both tradeable (LOW/MEDIUM risk) and still
-// within today's quota come back with recommended: true — everything else
-// is still returned (with full reasoning) so you get instant feedback on
-// every token seen, not just the ones that pass.
-async function assessAndGate({ chain, address }, maxPerDay) {
+// Runs the full assessment, applies the live "minimum tier to recommend"
+// gate, then the "very selective, max N/day" gate. Reads both from live
+// config so they're adjustable from Telegram/the dashboard without a
+// redeploy. Everything evaluated is still returned (with full reasoning)
+// for instant feedback — only assessment.recommended changes.
+async function assessAndGate({ chain, address }) {
+  const cfg = getConfig();
   const assessment = chain === 'solana' ? await assessSolanaToken(address) : await assessBscToken(address);
   if (!assessment.tradeable) return assessment;
 
-  const gotSlot = tryConsumeDailySlot(maxPerDay);
+  if (assessment.verdict === 'MEDIUM' && cfg.minRecommendTier === 'LOW') {
+    assessment.reasons.push('MEDIUM risk tokens are currently turned off (min recommend tier = LOW).');
+    return assessment;
+  }
+
+  const gotSlot = tryConsumeDailySlot(cfg.maxTokensPerDay);
   assessment.recommended = gotSlot;
   if (!gotSlot) {
-    assessment.reasons.push(`Passed the safety filter, but today's ${maxPerDay}-token quota is already used.`);
+    assessment.reasons.push(`Passed the safety filter, but today's ${cfg.maxTokensPerDay}-token quota is already used.`);
   }
   return assessment;
 }

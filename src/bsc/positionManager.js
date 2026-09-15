@@ -1,16 +1,12 @@
 const { ethers } = require('ethers');
-const {
-  BSC_CAPITAL_PCT,
-  BSC_MAX_POSITION_BNB,
-  BSC_MAX_CONCURRENT_POSITIONS,
-  PRICE_POLL_INTERVAL_MS,
-  MAX_TOKENS_PER_DAY,
-  DRY_RUN,
-} = require('../config');
+const { BSC_MAX_CONCURRENT_POSITIONS, PRICE_POLL_INTERVAL_MS, DRY_RUN } = require('../config');
 const { assessAndGate } = require('../analysis/riskEngine');
 const { quoteSell, buyWithBnb, sellForBnb, getTokenDecimals } = require('./pancakeswap');
 const { getBnbBalance, loadWallet } = require('./wallet');
 const { logTrade } = require('../db/tradeLog');
+const { getConfig } = require('../live/liveConfig');
+const stateSync = require('../live/stateSync');
+const telegram = require('../telegram/bot');
 
 const openPositions = new Map(); // tokenAddress -> position state
 
@@ -33,6 +29,18 @@ function printFindings(tokenAddress, assessment) {
   console.log('');
 }
 
+function findingsMessage(tokenAddress, assessment) {
+  const lines = [
+    `🔎 BSC — ${assessment.recommended ? '✅ RECOMMENDED' : assessment.verdict}`,
+    `CA: ${tokenAddress}`,
+    assessment.category ? `Category: ${assessment.category}${assessment.isCommunityCoin ? ' (community coin)' : ''}` : null,
+    assessment.devPercent != null ? `Owner holding: ~${assessment.devPercent.toFixed(1)}%` : null,
+    assessment.top10Percent != null ? `Top10: ~${assessment.top10Percent.toFixed(1)}%` : null,
+    ...assessment.reasons.map((r) => `• ${r}`),
+  ].filter(Boolean);
+  return lines.join('\n');
+}
+
 async function tryEnterPosition(tokenAddress) {
   if (openPositions.size >= BSC_MAX_CONCURRENT_POSITIONS) {
     console.log(`[position-bsc] skipping ${tokenAddress} — already at BSC_MAX_CONCURRENT_POSITIONS (${BSC_MAX_CONCURRENT_POSITIONS})`);
@@ -42,7 +50,7 @@ async function tryEnterPosition(tokenAddress) {
 
   let assessment;
   try {
-    assessment = await assessAndGate({ chain: 'bsc', address: tokenAddress }, MAX_TOKENS_PER_DAY);
+    assessment = await assessAndGate({ chain: 'bsc', address: tokenAddress });
   } catch (err) {
     console.error(`[position-bsc] risk assessment failed for ${tokenAddress}, skipping (fail-closed):`, err.message);
     logTrade({ tokenAddress, chain: 'bsc', event: 'skipped', reason: `risk assessment error: ${err.message}` });
@@ -51,13 +59,28 @@ async function tryEnterPosition(tokenAddress) {
 
   printFindings(tokenAddress, assessment);
   logTrade({ tokenAddress, chain: 'bsc', event: 'assessed', ...assessment });
+  stateSync.recordAssessment({ ...assessment, chain: 'bsc', address: tokenAddress });
+
+  if (assessment.recommended) {
+    telegram.notify(findingsMessage(tokenAddress, assessment));
+  }
 
   if (!assessment.recommended) return;
 
+  const liveCfg = getConfig();
+  if (liveCfg.paused) {
+    console.log(`[position-bsc] ${tokenAddress} was recommended but the bot is currently paused — skipping entry.`);
+    return;
+  }
+  if (!liveCfg.enableBsc) {
+    console.log(`[position-bsc] ${tokenAddress} was recommended but BSC trading is currently disabled — skipping entry.`);
+    return;
+  }
+
   const wallet = loadWallet();
   const bnbBalance = await getBnbBalance();
-  const rawSize = bnbBalance * (BSC_CAPITAL_PCT / 100);
-  const sizeBnb = Math.min(rawSize, BSC_MAX_POSITION_BNB);
+  const rawSize = bnbBalance * (liveCfg.bscCapitalPct / 100);
+  const sizeBnb = Math.min(rawSize, liveCfg.bscMaxPositionBnb);
 
   if (sizeBnb <= 0) {
     console.log(`[position-bsc] skipping ${tokenAddress} — computed size non-positive (balance=${bnbBalance})`);
@@ -76,6 +99,14 @@ async function tryEnterPosition(tokenAddress) {
   }
 
   const decimals = await getTokenDecimals(tokenAddress).catch(() => 18);
+  const dbPositionId = await stateSync.recordPositionOpened({
+    chain: 'bsc',
+    address: tokenAddress,
+    dryRun: buyResult.dryRun,
+    sizeNative: sizeBnb,
+    entryTx: buyResult.txHash,
+  });
+
   const position = {
     tokenAddress,
     sizeBnb,
@@ -85,11 +116,13 @@ async function tryEnterPosition(tokenAddress) {
     dryRun: buyResult.dryRun,
     buyTxHash: buyResult.txHash,
     exit: assessment.exit,
+    dbPositionId,
   };
   openPositions.set(tokenAddress, position);
 
   console.log(`[position-bsc] ${DRY_RUN ? '[DRY RUN] ' : ''}ENTERED ${tokenAddress} — ${sizeBnb.toFixed(4)} BNB`);
   logTrade({ tokenAddress, chain: 'bsc', event: 'buy', sizeBnb, dryRun: buyResult.dryRun, txHash: buyResult.txHash });
+  telegram.notify(`🟢 BOUGHT ${tokenAddress}\n${sizeBnb.toFixed(4)} BNB${buyResult.dryRun ? ' (dry run)' : ''}`);
 
   monitorPosition(tokenAddress);
 }
@@ -136,6 +169,7 @@ async function exitPosition(tokenAddress, reason, pnlPct) {
   } catch (err) {
     console.error(`[position-bsc] sell failed for ${tokenAddress}:`, err.message);
     logTrade({ tokenAddress, chain: 'bsc', event: 'sell_failed', error: err.message, reason });
+    telegram.notify(`⚠️ SELL FAILED for ${tokenAddress}: ${err.message}`);
     return;
   }
 
@@ -151,6 +185,14 @@ async function exitPosition(tokenAddress, reason, pnlPct) {
     dryRun: sellResult.dryRun,
     txHash: sellResult.txHash,
   });
+  stateSync.recordPositionClosed(position.dbPositionId, {
+    exitTx: sellResult.txHash,
+    exitReason: reason,
+    pnlPct,
+  });
+  telegram.notify(
+    `🔴 SOLD ${tokenAddress}\nreason: ${reason}\npnl: ${pnlPct.toFixed(1)}%${sellResult.dryRun ? ' (dry run)' : ''}`
+  );
 }
 
 module.exports = { tryEnterPosition, openPositions };

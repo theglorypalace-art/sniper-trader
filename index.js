@@ -1,5 +1,7 @@
 const config = require('./src/config');
 const { getDailyCount } = require('./src/analysis/dailyLimiter');
+const liveConfig = require('./src/live/liveConfig');
+const telegram = require('./src/telegram/bot');
 
 const { PumpFunDetector } = require('./src/pumpfun/detector');
 const { tryEnterPosition: trySolanaPosition } = require('./src/trading/positionManager');
@@ -53,8 +55,17 @@ async function bootBsc() {
 async function main() {
   console.log('[boot] meme coin scanner starting...');
   console.log(`[boot] DRY_RUN = ${config.DRY_RUN} ${config.DRY_RUN ? '(no real trades will be sent)' : '(REAL TRADES WILL BE SENT)'}`);
-  console.log(`[boot] daily selectivity: max ${config.MAX_TOKENS_PER_DAY} recommended tokens/day (${getDailyCount()} used so far today)`);
-  console.log(`[boot] chains enabled: solana=${config.ENABLE_SOLANA} bsc=${config.ENABLE_BSC}`);
+
+  // Live config (Supabase) loads first — everything else reads from it for
+  // filter thresholds and the pause switch. Falls back to static .env
+  // defaults automatically if Supabase isn't configured.
+  await liveConfig.start();
+  telegram.start();
+
+  console.log(`[boot] daily selectivity: max ${liveConfig.getConfig().maxTokensPerDay} recommended tokens/day (${getDailyCount()} used so far today)`);
+  console.log(`[boot] chains enabled at process level: solana=${config.ENABLE_SOLANA} bsc=${config.ENABLE_BSC}`);
+  console.log('[boot] note: ENABLE_SOLANA/ENABLE_BSC here control whether each chain\'s listener starts at all (needs a redeploy to change).');
+  console.log('[boot] once a chain\'s listener is running, live config\'s enableSolana/enableBsc (Telegram /solana, /bsc) control whether it actually buys anything — that part is instant.');
 
   if (!config.ENABLE_SOLANA && !config.ENABLE_BSC) {
     throw new Error('Both ENABLE_SOLANA and ENABLE_BSC are disabled in .env — nothing to run.');

@@ -1,7 +1,7 @@
 {
   "name": "memecoin-scanner",
-  "version": "2.0.0",
-  "description": "Monitors new meme coin launches on Solana (pump.fun) and BNB Smart Chain (PancakeSwap), scores each with a risk engine (dev %, holder concentration, honeypot/tax checks, LP lock, migration status), and only recommends/trades the small, very selective subset that passes — max N per day. DRY_RUN by default.",
+  "version": "3.0.0",
+  "description": "Always-on scanner/trader for new meme coin launches on Solana (pump.fun) and BNB Smart Chain (PancakeSwap). Scores every token with a risk engine, trades only the very selective subset that passes, and is controllable live via Telegram + Supabase (pause/resume, adjustable filters) without a redeploy. DRY_RUN by default.",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
@@ -9,9 +9,11 @@
   },
   "dependencies": {
     "@solana/web3.js": "^1.95.3",
+    "@supabase/supabase-js": "^2.45.4",
     "bs58": "^6.0.0",
     "dotenv": "^16.4.5",
     "ethers": "^6.13.4",
+    "node-telegram-bot-api": "^0.66.0",
     "ws": "^8.18.0"
   }
 }

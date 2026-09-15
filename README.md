@@ -107,3 +107,85 @@ cp .env.example .env
 - The risk engine's scoring weights and hard-reject thresholds live in `src/analysis/riskEngine.js` — tune them as you gather real data on what actually correlates with rugs vs. genuine plays.
 - `daily-limit-state.json` (git-ignored) tracks today's used quota — delete it to reset manually, or just wait for UTC midnight.
 - No Telegram/dashboard notifier exists yet — everything runs from `trades.log` and console output, by design (see "Execution speed" above). A read-only notifier that mirrors the console output elsewhere (without gating execution) would be a safe addition.
+
+---
+
+## Going 24/7: Railway + Supabase + Telegram + Dashboard
+
+This section covers turning the engine into an always-on bot with live,
+no-redeploy filter control and a Telegram bot / web dashboard on top.
+
+### Architecture
+
+```
+┌─────────────────────────┐        ┌──────────────────┐
+│  Engine (Railway)        │◄──────►│                  │
+│  - detectors             │  reads  │    Supabase       │
+│  - risk engine           │  writes │  bot_config       │
+│  - position managers     │        │  assessments      │
+│  - Telegram bot (polling)│        │  positions        │
+└─────────────────────────┘        └────────▲─────────┘
+                                             │ reads/writes
+                                    ┌────────┴─────────┐
+                                    │ Dashboard (Vercel) │
+                                    │  /dashboard folder │
+                                    └───────────────────┘
+```
+
+The engine is the only thing that ever executes trades. Telegram and the
+dashboard are both just control surfaces that read/write the same
+Supabase tables — neither can trade directly, and either can be skipped
+entirely if you only want one.
+
+### 1. Supabase (shared live-config + data layer)
+
+1. Create a project at [supabase.com](https://supabase.com).
+2. Open the SQL editor and run everything in `supabase/schema.sql`.
+3. Database → Replication → turn on Realtime for `bot_config` (lets filter
+   changes apply within seconds instead of waiting for the 15s poll).
+4. Project Settings → API → copy the **Project URL** and the
+   **service_role key** (not the anon key — the engine and dashboard's
+   API routes both run server-side and need the elevated key; the anon
+   key is never used anywhere in this project).
+
+### 2. Engine on Railway
+
+1. Push this repo to GitHub (already done if you're reading this from there).
+2. [railway.app](https://railway.app) → New Project → Deploy from GitHub repo → select `sniper-trader`.
+3. Add environment variables (Railway → Variables): everything from `.env.example`, including `SUPABASE_URL` / `SUPABASE_SERVICE_KEY` and (once you've made the bot below) `TELEGRAM_BOT_TOKEN`.
+4. Deploy. `railway.json` is already set to restart automatically on crash — this is what makes it "standby 24/7" instead of dying the moment something throws.
+5. Watch the deploy logs for `[boot] ✅ listening for new pump.fun launches` — that confirms it's live.
+
+### 3. Telegram bot
+
+1. Message [@BotFather](https://t.me/BotFather) on Telegram → `/newbot` → follow the prompts → copy the token it gives you into `TELEGRAM_BOT_TOKEN` on Railway.
+2. Message your new bot `/start`. It replies with your chat ID.
+3. Set `TELEGRAM_CHAT_ID` to that value on Railway and redeploy — this locks control to just you (without it, anyone who finds your bot could pause it or change your filters).
+4. From then on: `/status`, `/pause`, `/resume`, `/setmax <n>`, `/setrisk low|lowmedium`, `/solana on|off`, `/bsc on|off` — plus automatic push notifications the moment a token is recommended, bought, or sold.
+
+### 4. Dashboard on Vercel (optional)
+
+The dashboard lives in `dashboard/` inside this same repo.
+
+1. [vercel.com](https://vercel.com) → New Project → import this repo → **set Root Directory to `dashboard`** (this is the one Vercel-specific setting that matters — without it, Vercel tries to build the whole repo as one Next.js app).
+2. Environment variables: `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, and a `DASHBOARD_PASSWORD` you choose yourself (treat it like a real credential — it gates pause/resume and your position-sizing controls).
+3. Deploy. Visit the URL, enter the password, and you'll see live positions, recent findings, and an editable filter panel.
+
+**Note on the two "enable Solana/BSC" switches:** the `ENABLE_SOLANA` /
+`ENABLE_BSC` variables on Railway control whether that chain's *listener*
+starts at all — changing those needs a redeploy. Once a listener is
+running, the live `enable_solana` / `enable_bsc` values in Supabase (via
+Telegram's `/solana`, `/bsc` or the dashboard) control whether it's
+actually *allowed to buy anything* — that part is instant, no redeploy.
+Practically: turn a chain on in Railway once, then use Telegram/the
+dashboard to flip it on/off day-to-day.
+
+### What's genuinely live vs. what needs a redeploy
+
+| Adjustable live (Telegram/dashboard, ~instant) | Needs a Railway redeploy |
+|---|---|
+| Pause/resume all trading | Which chains' listeners start at all (`ENABLE_SOLANA`/`ENABLE_BSC`) |
+| Min risk tier to recommend (LOW / LOW+MEDIUM) | `DRY_RUN` on/off |
+| Max tokens/day | Wallet private keys |
+| Max dev % / top-10 % thresholds | RPC endpoints, program/contract addresses |
+| Position size (% and hard cap, per chain) | Exit plan values (TP/SL/max-hold per tier — still in code) |

@@ -1,17 +1,12 @@
 const { LAMPORTS_PER_SOL } = require('@solana/web3.js');
-const {
-  CAPITAL_PCT,
-  MAX_POSITION_SOL,
-  PRICE_POLL_INTERVAL_MS,
-  MAX_CONCURRENT_POSITIONS,
-  SOL_MINT,
-  MAX_TOKENS_PER_DAY,
-  DRY_RUN,
-} = require('../config');
+const { PRICE_POLL_INTERVAL_MS, MAX_CONCURRENT_POSITIONS, SOL_MINT, DRY_RUN } = require('../config');
 const { assessAndGate } = require('../analysis/riskEngine');
 const { getQuote, buySol, sellToSol } = require('./jupiter');
 const { getSolBalance, loadWallet } = require('../solana/wallet');
 const { logTrade } = require('../db/tradeLog');
+const { getConfig } = require('../live/liveConfig');
+const stateSync = require('../live/stateSync');
+const telegram = require('../telegram/bot');
 
 const openPositions = new Map(); // mint -> position state
 
@@ -37,6 +32,18 @@ function printFindings(mint, assessment) {
   console.log('');
 }
 
+function findingsMessage(mint, assessment) {
+  const lines = [
+    `🔎 Solana — ${assessment.recommended ? '✅ RECOMMENDED' : assessment.verdict}`,
+    `CA: ${mint}`,
+    assessment.category ? `Category: ${assessment.category}${assessment.isCommunityCoin ? ' (community coin)' : ''}` : null,
+    assessment.devPercent != null ? `Dev holding: ~${assessment.devPercent.toFixed(1)}%` : null,
+    assessment.top10Percent != null ? `Top10: ~${assessment.top10Percent.toFixed(1)}%` : null,
+    ...assessment.reasons.map((r) => `• ${r}`),
+  ].filter(Boolean);
+  return lines.join('\n');
+}
+
 async function tryEnterPosition(mint) {
   if (openPositions.size >= MAX_CONCURRENT_POSITIONS) {
     console.log(`[position] skipping ${mint} — already at MAX_CONCURRENT_POSITIONS (${MAX_CONCURRENT_POSITIONS})`);
@@ -44,11 +51,9 @@ async function tryEnterPosition(mint) {
   }
   if (openPositions.has(mint)) return;
 
-  // Every detected launch gets a full risk assessment and instant
-  // console/log feedback — whether or not it ends up recommended/traded.
   let assessment;
   try {
-    assessment = await assessAndGate({ chain: 'solana', address: mint }, MAX_TOKENS_PER_DAY);
+    assessment = await assessAndGate({ chain: 'solana', address: mint });
   } catch (err) {
     console.error(`[position] risk assessment failed for ${mint}, skipping (fail-closed):`, err.message);
     logTrade({ mint, chain: 'solana', event: 'skipped', reason: `risk assessment error: ${err.message}` });
@@ -57,13 +62,28 @@ async function tryEnterPosition(mint) {
 
   printFindings(mint, assessment);
   logTrade({ mint, chain: 'solana', event: 'assessed', ...assessment });
+  stateSync.recordAssessment({ ...assessment, chain: 'solana', address: mint });
+
+  if (assessment.recommended) {
+    telegram.notify(findingsMessage(mint, assessment));
+  }
 
   if (!assessment.recommended) return;
 
+  const liveCfg = getConfig();
+  if (liveCfg.paused) {
+    console.log(`[position] ${mint} was recommended but the bot is currently paused — skipping entry.`);
+    return;
+  }
+  if (!liveCfg.enableSolana) {
+    console.log(`[position] ${mint} was recommended but Solana trading is currently disabled — skipping entry.`);
+    return;
+  }
+
   const wallet = loadWallet();
   const solBalance = await getSolBalance();
-  const rawSize = solBalance * (CAPITAL_PCT / 100);
-  const sizeSol = Math.min(rawSize, MAX_POSITION_SOL);
+  const rawSize = solBalance * (liveCfg.capitalPct / 100);
+  const sizeSol = Math.min(rawSize, liveCfg.maxPositionSol);
 
   if (sizeSol <= 0) {
     console.log(`[position] skipping ${mint} — computed size non-positive (balance=${solBalance})`);
@@ -82,6 +102,14 @@ async function tryEnterPosition(mint) {
   }
 
   const entryPriceSolPerToken = lamports / Number(buyResult.quote.outAmount);
+  const dbPositionId = await stateSync.recordPositionOpened({
+    chain: 'solana',
+    address: mint,
+    dryRun: buyResult.dryRun,
+    sizeNative: sizeSol,
+    entryTx: buyResult.signature,
+  });
+
   const position = {
     mint,
     sizeSol,
@@ -91,6 +119,7 @@ async function tryEnterPosition(mint) {
     dryRun: buyResult.dryRun,
     buySignature: buyResult.signature,
     exit: assessment.exit,
+    dbPositionId,
   };
   openPositions.set(mint, position);
 
@@ -98,6 +127,7 @@ async function tryEnterPosition(mint) {
     `[position] ${DRY_RUN ? '[DRY RUN] ' : ''}ENTERED ${mint} — ${sizeSol.toFixed(4)} SOL @ ${entryPriceSolPerToken}`
   );
   logTrade({ mint, chain: 'solana', event: 'buy', sizeSol, dryRun: buyResult.dryRun, signature: buyResult.signature });
+  telegram.notify(`🟢 BOUGHT ${mint}\n${sizeSol.toFixed(4)} SOL${buyResult.dryRun ? ' (dry run)' : ''}`);
 
   monitorPosition(mint);
 }
@@ -144,6 +174,7 @@ async function exitPosition(mint, reason, pnlPct) {
   } catch (err) {
     console.error(`[position] sell failed for ${mint}:`, err.message);
     logTrade({ mint, chain: 'solana', event: 'sell_failed', error: err.message, reason });
+    telegram.notify(`⚠️ SELL FAILED for ${mint}: ${err.message}`);
     return;
   }
 
@@ -159,6 +190,14 @@ async function exitPosition(mint, reason, pnlPct) {
     dryRun: sellResult.dryRun,
     signature: sellResult.signature,
   });
+  stateSync.recordPositionClosed(position.dbPositionId, {
+    exitTx: sellResult.signature,
+    exitReason: reason,
+    pnlPct,
+  });
+  telegram.notify(
+    `🔴 SOLD ${mint}\nreason: ${reason}\npnl: ${pnlPct.toFixed(1)}%${sellResult.dryRun ? ' (dry run)' : ''}`
+  );
 }
 
 module.exports = { tryEnterPosition, openPositions };

@@ -1,6 +1,12 @@
 const { Keypair, Connection, LAMPORTS_PER_SOL, PublicKey } = require('@solana/web3.js');
-const bs58 = require('bs58');
 const { WALLET_PRIVATE_KEY, HELIUS_RPC_URL, DRY_RUN } = require('../config');
+
+// bs58 v5/v6 shipped as ESM-only, so require('bs58') under CommonJS
+// returns { default: { encode, decode } } instead of exposing decode
+// directly like v4 did — this normalizes both shapes so it keeps working
+// whichever one npm actually installs.
+const bs58Module = require('bs58');
+const bs58 = typeof bs58Module.decode === 'function' ? bs58Module : bs58Module.default;
 
 let keypair = null;
 

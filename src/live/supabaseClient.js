@@ -1,4 +1,5 @@
 const { createClient } = require('@supabase/supabase-js');
+const WebSocket = require('ws');
 const { SUPABASE_URL, SUPABASE_SERVICE_KEY } = require('../config');
 
 let client = null;
@@ -12,6 +13,9 @@ function getSupabase() {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) return null;
   client = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
     auth: { persistSession: false },
+    // Supabase realtime needs a WebSocket implementation. Node 22+ has one
+    // built in; passing `ws` explicitly keeps this working on older runtimes too.
+    realtime: { transport: WebSocket },
   });
   return client;
 }

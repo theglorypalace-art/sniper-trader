@@ -18,6 +18,21 @@ let cached = {
   bscMaxPositionBnb: staticConfig.BSC_MAX_POSITION_BNB,
 };
 
+// Maps the camelCase keys used in code to the bot_config column names.
+const COLUMNS = {
+  paused: 'paused',
+  enableSolana: 'enable_solana',
+  enableBsc: 'enable_bsc',
+  minRecommendTier: 'min_recommend_tier',
+  maxTokensPerDay: 'max_tokens_per_day',
+  maxDevPercent: 'max_dev_percent',
+  maxTop10Percent: 'max_top10_percent',
+  capitalPct: 'capital_pct',
+  maxPositionSol: 'max_position_sol',
+  bscCapitalPct: 'bsc_capital_pct',
+  bscMaxPositionBnb: 'bsc_max_position_bnb',
+};
+
 function mapRow(row) {
   if (!row) return cached;
   return {
@@ -51,6 +66,14 @@ function getConfig() {
   return cached;
 }
 
+// Applies a change to the in-memory config immediately. Used when Supabase
+// isn't configured (so Telegram buttons still work until the next restart),
+// and after a Supabase write so the value shown is never stale.
+function applyLocal(patch) {
+  cached = { ...cached, ...patch };
+  return cached;
+}
+
 // Call once at boot. Does an initial fetch, then subscribes to realtime
 // changes AND polls every 15s as a fallback in case the realtime
 // connection drops silently.
@@ -75,4 +98,4 @@ async function start() {
   setInterval(refresh, 15000);
 }
 
-module.exports = { start, getConfig, refresh };
+module.exports = { start, getConfig, refresh, applyLocal, COLUMNS };

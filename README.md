@@ -161,7 +161,9 @@ entirely if you only want one.
 1. Message [@BotFather](https://t.me/BotFather) on Telegram → `/newbot` → follow the prompts → copy the token it gives you into `TELEGRAM_BOT_TOKEN` on Railway.
 2. Message your new bot `/start`. It replies with your chat ID.
 3. Set `TELEGRAM_CHAT_ID` to that value on Railway and redeploy — this locks control to just you (without it, anyone who finds your bot could pause it or change your filters).
-4. From then on: `/status`, `/pause`, `/resume`, `/setmax <n>`, `/setrisk low|lowmedium`, `/solana on|off`, `/bsc on|off` — plus automatic push notifications the moment a token is recommended, bought, or sold.
+4. From then on, send `/menu` and control everything with buttons — start/stop trading, Solana/BSC on/off, **capital % per trade** (presets, −/+ nudges, or type any value), max size per trade, daily limit, risk tier, and the dev/top-10 filters. Every setting also has a typed command (`/setcapital 12.5`, `/setbsccapital`, `/setmaxpos`, `/setbscmaxpos`, `/setmax`, `/setrisk low|lowmedium`, `/setdev`, `/settop10`, `/solana on|off`, `/bsc on|off`; send one with no number to get its buttons). Changes apply to the very next trade, no redeploy. You also get automatic push notifications the moment a token is recommended, bought, or sold.
+
+   Note: each buy uses the **smaller** of *capital %* and the *max per trade* cap, so raise both if you want bigger buys.
 
 ### 4. Dashboard on Vercel (optional)
 

@@ -1,7 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
-const { TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID } = require('../config');
+const { TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DRY_RUN } = require('../config');
 const { getSupabase } = require('../live/supabaseClient');
-const { getConfig, refresh } = require('../live/liveConfig');
+const { getConfig, refresh, applyLocal, COLUMNS } = require('../live/liveConfig');
 const { getDailyCount } = require('../analysis/dailyLimiter');
 
 let bot = null;
@@ -13,15 +13,136 @@ function getBot() {
   return bot;
 }
 
-async function updateConfig(fields) {
+// ---------------------------------------------------------------------
+// Adjustable numeric settings. Each one gets: a value-picker screen with
+// presets and -/+ buttons, a "type your own value" option, and a slash
+// command (e.g. /setcapital 12.5). Add a new entry here and it shows up
+// everywhere automatically.
+// ---------------------------------------------------------------------
+const SETTINGS = {
+  capitalPct: {
+    cmd: 'setcapital',
+    title: '🟣 Solana — capital per trade',
+    unit: '%',
+    min: 0.1,
+    max: 95, // keep a little back for fees / rent
+    presets: [1, 2, 5, 10, 15, 25, 50, 75],
+    steps: [1, 5],
+    parent: 'm:cap',
+    warnAbove: 25,
+    describe: (c) => `Each Solana buy uses this % of your SOL balance, capped at ${fmt(c.maxPositionSol)} SOL (the smaller of the two applies).`,
+  },
+  bscCapitalPct: {
+    cmd: 'setbsccapital',
+    title: '🟡 BSC — capital per trade',
+    unit: '%',
+    min: 0.1,
+    max: 95,
+    presets: [1, 2, 5, 10, 15, 25, 50, 75],
+    steps: [1, 5],
+    parent: 'm:cap',
+    warnAbove: 25,
+    describe: (c) => `Each BSC buy uses this % of your BNB balance, capped at ${fmt(c.bscMaxPositionBnb)} BNB (the smaller of the two applies).`,
+  },
+  maxPositionSol: {
+    cmd: 'setmaxpos',
+    title: '🟣 Solana — max per trade',
+    unit: ' SOL',
+    min: 0.001,
+    max: 1000,
+    presets: [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10],
+    steps: [0.05, 0.25],
+    parent: 'm:cap',
+    describe: (c) => `Hard ceiling on one Solana buy, no matter what the capital % says. Currently ${fmt(c.capitalPct)}% of balance.`,
+  },
+  bscMaxPositionBnb: {
+    cmd: 'setbscmaxpos',
+    title: '🟡 BSC — max per trade',
+    unit: ' BNB',
+    min: 0.001,
+    max: 1000,
+    presets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5],
+    steps: [0.01, 0.05],
+    parent: 'm:cap',
+    describe: (c) => `Hard ceiling on one BSC buy, no matter what the capital % says. Currently ${fmt(c.bscCapitalPct)}% of balance.`,
+  },
+  maxTokensPerDay: {
+    cmd: 'setmax',
+    title: '🎯 Daily limit',
+    unit: '',
+    min: 1,
+    max: 100,
+    int: true,
+    presets: [1, 2, 3, 5, 10, 20, 50, 100],
+    steps: [1, 5],
+    parent: 'menu',
+    describe: (c) => `Max tokens recommended (and traded) per UTC day. Used today: ${getDailyCount()}/${c.maxTokensPerDay}.`,
+  },
+  maxDevPercent: {
+    cmd: 'setdev',
+    title: '🔍 Max dev/creator holding',
+    unit: '%',
+    min: 1,
+    max: 100,
+    presets: [5, 10, 15, 20, 30, 40, 50, 70],
+    steps: [1, 5],
+    parent: 'm:filters',
+    describe: () => `Tokens where the creator/owner wallet holds more than this % of supply are rejected.`,
+  },
+  maxTop10Percent: {
+    cmd: 'settop10',
+    title: '🔍 Max top-10 holders',
+    unit: '%',
+    min: 1,
+    max: 100,
+    presets: [30, 40, 50, 60, 70, 80, 90, 100],
+    steps: [1, 5],
+    parent: 'm:filters',
+    describe: () => `Tokens where the top 10 holders control more than this % of supply are rejected.`,
+  },
+};
+
+const fmt = (n) => String(Number(Number(n).toFixed(4)));
+const round4 = (n) => Math.round(n * 10000) / 10000;
+const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+
+function validate(def, raw) {
+  const n = Number(raw);
+  if (raw === '' || raw == null || !Number.isFinite(n)) return { error: 'That is not a number.' };
+  if (def.int && !Number.isInteger(n)) return { error: 'Please enter a whole number.' };
+  if (n < def.min || n > def.max) {
+    return { error: `Must be between ${fmt(def.min)} and ${fmt(def.max)}${def.unit}.` };
+  }
+  return { value: def.int ? n : round4(n) };
+}
+
+// Accepts "12", "12.5", "12,5", "12%", " 0.25 SOL " ...
+function parseNumber(text) {
+  const cleaned = String(text).trim().replace(',', '.').replace(/\s*(%|sol|bnb)\s*$/i, '');
+  return cleaned;
+}
+
+// ---------------------------------------------------------------------
+// Config writes
+// ---------------------------------------------------------------------
+async function updateConfig(patch) {
   const supabase = getSupabase();
-  if (!supabase) throw new Error("Supabase not configured — live control needs it (see supabase/schema.sql).");
+  if (!supabase) {
+    // No Supabase: still works, but only until the next restart.
+    return applyLocal(patch);
+  }
+  const fields = {};
+  for (const [k, v] of Object.entries(patch)) {
+    if (!COLUMNS[k]) throw new Error(`Unknown setting: ${k}`);
+    fields[COLUMNS[k]] = v;
+  }
   const { error } = await supabase.from('bot_config').update({ ...fields, updated_by: 'telegram' }).eq('id', 1);
   if (error) throw error;
   // Force an immediate re-read instead of waiting on the realtime push or
-  // the 15s poll, so the confirmation message that follows always shows
-  // the true, just-applied state — not a stale cached value.
-  return refresh();
+  // the 15s poll, then pin the values we just wrote so what's displayed can
+  // never be stale even if that re-read failed.
+  await refresh();
+  return applyLocal(patch);
 }
 
 // If TELEGRAM_CHAT_ID isn't set, anyone who finds the bot can control it —
@@ -32,47 +153,145 @@ function isAuthorized(chatId) {
   return String(chatId) === String(TELEGRAM_CHAT_ID);
 }
 
+// ---------------------------------------------------------------------
+// Views (text + inline keyboard). Every screen has a way back.
+// ---------------------------------------------------------------------
+const btn = (text, data) => ({ text, callback_data: data });
+const view = (text, inline_keyboard) => ({ text, reply_markup: { inline_keyboard } });
+
 function statusText(cfg) {
-  return (
-    `${cfg.paused ? '⏸ TRADING STOPPED' : '🟢 TRADING LIVE'}\n\n` +
-    `Chains: Solana ${cfg.enableSolana ? 'ON' : 'OFF'} | BSC ${cfg.enableBsc ? 'ON' : 'OFF'}\n` +
-    `Min tier to recommend: ${cfg.minRecommendTier}\n` +
-    `Daily quota used: ${getDailyCount()}/${cfg.maxTokensPerDay}\n` +
-    `Risk limits: dev% ≤ ${cfg.maxDevPercent} | top10% ≤ ${cfg.maxTop10Percent}\n` +
-    `Position size: ${cfg.capitalPct}% SOL (max ${cfg.maxPositionSol}) | ${cfg.bscCapitalPct}% BNB (max ${cfg.bscMaxPositionBnb})`
+  const lines = [
+    cfg.paused ? '⏸ TRADING STOPPED' : '🟢 TRADING LIVE',
+    DRY_RUN ? 'Mode: 🧪 DRY RUN (no real trades)' : 'Mode: 🔴 LIVE (real trades)',
+    '',
+    `Chains: Solana ${cfg.enableSolana ? 'ON' : 'OFF'} | BSC ${cfg.enableBsc ? 'ON' : 'OFF'}`,
+    `Capital per trade: ${fmt(cfg.capitalPct)}% SOL (max ${fmt(cfg.maxPositionSol)}) | ${fmt(cfg.bscCapitalPct)}% BNB (max ${fmt(cfg.bscMaxPositionBnb)})`,
+    `Min tier to recommend: ${cfg.minRecommendTier === 'LOW' ? 'LOW only' : 'LOW + MEDIUM'}`,
+    `Daily quota used: ${getDailyCount()}/${cfg.maxTokensPerDay}`,
+    `Risk limits: dev% ≤ ${fmt(cfg.maxDevPercent)} | top10% ≤ ${fmt(cfg.maxTop10Percent)}`,
+  ];
+  if (!getSupabase()) lines.push('', '⚠️ Supabase not configured — changes apply now but reset on restart.');
+  return lines.join('\n');
+}
+
+function mainView(cfg, banner) {
+  return view((banner ? `${banner}\n\n` : '') + statusText(cfg), [
+    [
+      cfg.paused ? btn('▶️ Start trading', 'resume') : btn('⏸ Stop trading', 'pause'),
+      btn('🔄 Refresh', 'status'),
+    ],
+    [
+      btn(cfg.enableSolana ? '🟣 Solana: ON' : '🟣 Solana: OFF', 'toggle_solana'),
+      btn(cfg.enableBsc ? '🟡 BSC: ON' : '🟡 BSC: OFF', 'toggle_bsc'),
+    ],
+    [btn('💰 Capital %', 'm:cap'), btn('🎯 Daily limit', 'v:maxTokensPerDay')],
+    [btn('🛡 Risk tier', 'm:risk'), btn('🔍 Filters', 'm:filters')],
+    [btn('❓ Help', 'help')],
+  ]);
+}
+
+function capitalView(cfg, banner) {
+  return view(
+    (banner ? `${banner}\n\n` : '') +
+      `💰 Capital per trade\n\n` +
+      `🟣 Solana: ${fmt(cfg.capitalPct)}% of SOL balance, max ${fmt(cfg.maxPositionSol)} SOL\n` +
+      `🟡 BSC: ${fmt(cfg.bscCapitalPct)}% of BNB balance, max ${fmt(cfg.bscMaxPositionBnb)} BNB\n\n` +
+      `Each buy uses the % of your balance but never more than the max — the smaller of the two applies. ` +
+      `Raise the max too if you want bigger buys. Changes apply to the very next trade.`,
+    [
+      [btn(`🟣 Solana % (${fmt(cfg.capitalPct)}%)`, 'v:capitalPct'), btn(`🟡 BSC % (${fmt(cfg.bscCapitalPct)}%)`, 'v:bscCapitalPct')],
+      [btn(`🟣 SOL max (${fmt(cfg.maxPositionSol)})`, 'v:maxPositionSol'), btn(`🟡 BNB max (${fmt(cfg.bscMaxPositionBnb)})`, 'v:bscMaxPositionBnb')],
+      [btn('⬅️ Back', 'menu')],
+    ]
   );
 }
 
-function controlKeyboard(cfg) {
-  return {
-    reply_markup: {
-      inline_keyboard: [
-        [
-          cfg.paused
-            ? { text: '▶️ Start trading', callback_data: 'resume' }
-            : { text: '⏸ Stop trading', callback_data: 'pause' },
-          { text: '🔄 Refresh', callback_data: 'status' },
-        ],
-        [
-          { text: cfg.enableSolana ? '🟣 Solana: ON' : '🟣 Solana: OFF', callback_data: 'toggle_solana' },
-          { text: cfg.enableBsc ? '🟡 BSC: ON' : '🟡 BSC: OFF', callback_data: 'toggle_bsc' },
-        ],
-        [{ text: '❓ Help', callback_data: 'help' }],
-      ],
-    },
-  };
+function riskView(cfg, banner) {
+  const low = cfg.minRecommendTier === 'LOW';
+  return view(
+    (banner ? `${banner}\n\n` : '') +
+      `🛡 Minimum risk tier to recommend\n\nCurrent: ${low ? 'LOW only (strictest)' : 'LOW + MEDIUM'}\n\n` +
+      `LOW only trades the safest-looking tokens. LOW + MEDIUM lets through more, with more risk.`,
+    [
+      [btn(`${low ? '✅ ' : ''}LOW only`, 't:LOW'), btn(`${low ? '' : '✅ '}LOW + MEDIUM`, 't:LOW_MEDIUM')],
+      [btn('⬅️ Back', 'menu')],
+    ]
+  );
+}
+
+function filtersView(cfg) {
+  return view(
+    `🔍 Risk filters\n\nDev/creator holding limit: ${fmt(cfg.maxDevPercent)}%\nTop-10 holders limit: ${fmt(cfg.maxTop10Percent)}%\n\n` +
+      `Tokens over either limit are rejected before any trade.`,
+    [
+      [btn(`Dev ≤ ${fmt(cfg.maxDevPercent)}%`, 'v:maxDevPercent'), btn(`Top10 ≤ ${fmt(cfg.maxTop10Percent)}%`, 'v:maxTop10Percent')],
+      [btn('⬅️ Back', 'menu')],
+    ]
+  );
+}
+
+function pickerView(key, cfg, banner) {
+  const def = SETTINGS[key];
+  const cur = cfg[key];
+  const shortUnit = def.unit.trim() === '%' ? '%' : '';
+  const rows = [];
+
+  for (let i = 0; i < def.presets.length; i += 4) {
+    rows.push(
+      def.presets.slice(i, i + 4).map((p) => btn(`${Number(cur) === p ? '✅ ' : ''}${fmt(p)}${shortUnit}`, `s:${key}:${p}`))
+    );
+  }
+  const [small, large] = def.steps;
+  rows.push([
+    btn(`−${fmt(large)}`, `d:${key}:${-large}`),
+    btn(`−${fmt(small)}`, `d:${key}:${-small}`),
+    btn(`+${fmt(small)}`, `d:${key}:${small}`),
+    btn(`+${fmt(large)}`, `d:${key}:${large}`),
+  ]);
+  rows.push([btn('✏️ Type your own value', `c:${key}`)]);
+  rows.push([btn('⬅️ Back', def.parent)]);
+
+  const warn = def.warnAbove && Number(cur) > def.warnAbove ? `\n⚠️ That's a large share of your balance — one bad token can hurt.\n` : '';
+  return view(
+    (banner ? `${banner}\n\n` : '') +
+      `${def.title}\n\nCurrent: ${fmt(cur)}${def.unit}\n${warn}\n${def.describe(cfg)}\n\n` +
+      `Range ${fmt(def.min)}–${fmt(def.max)}${def.unit}. Tap a preset, nudge with −/+, or type your own.`,
+    rows
+  );
+}
+
+function customPromptView(key) {
+  const def = SETTINGS[key];
+  return view(
+    `✏️ ${def.title}\n\nType the new value and send it (${fmt(def.min)}–${fmt(def.max)}${def.unit}${def.int ? ', whole number' : ''}).\nExample: ${fmt(def.presets[2])}`,
+    [[btn('✖️ Cancel', `v:${key}`)]]
+  );
 }
 
 const HELP_TEXT =
-  `Commands (buttons above do the same thing — use whichever's easier):\n\n` +
-  `/status — full status + control buttons\n` +
+  `Everything is button-driven — tap /menu (or ❓ Help → Menu) and use the buttons. Typing works too:\n\n` +
+  `/menu or /status — control panel\n` +
   `/starttrading or /resume — resume buying recommended tokens\n` +
-  `/stoptrading or /pause — stop entering any new positions (open positions still get monitored/sold normally)\n` +
-  `/setmax <n> — max tokens recommended per day\n` +
-  `/setrisk low | lowmedium — only LOW risk, or LOW+MEDIUM\n` +
+  `/stoptrading or /pause — stop entering new positions (open ones are still monitored/sold)\n` +
   `/solana on|off, /bsc on|off — toggle a chain's trading\n\n` +
-  `Every finding, buy, and sell is pushed here automatically the moment it happens — you don't need to ask.`;
+  `Capital per trade:\n` +
+  `/setcapital <pct> — Solana % of SOL balance per buy (0.1–95)\n` +
+  `/setbsccapital <pct> — BSC % of BNB balance per buy\n` +
+  `/setmaxpos <sol> — Solana max SOL per buy\n` +
+  `/setbscmaxpos <bnb> — BSC max BNB per buy\n\n` +
+  `Selectivity & safety:\n` +
+  `/setmax <n> — max tokens per day\n` +
+  `/setrisk low|lowmedium — only LOW risk, or LOW+MEDIUM\n` +
+  `/setdev <pct> — max dev/creator holding\n` +
+  `/settop10 <pct> — max top-10 holder share\n\n` +
+  `Send any of the value commands with no number to get buttons for it. /cancel aborts typing a value.\n\n` +
+  `Every finding, buy, and sell is pushed here automatically the moment it happens.`;
 
+const helpView = () => view(HELP_TEXT, [[btn('📋 Open menu', 'menu')]]);
+
+// ---------------------------------------------------------------------
+// Bot wiring
+// ---------------------------------------------------------------------
 function start() {
   const b = getBot();
   if (!b) {
@@ -81,37 +300,65 @@ function start() {
   }
   console.log('[telegram] bot started (polling mode)');
 
-  async function replyWithStatus(chatId, header) {
-    const cfg = getConfig();
-    const text = header ? `${header}\n\n${statusText(cfg)}` : statusText(cfg);
-    return b.sendMessage(chatId, text, controlKeyboard(cfg));
+  // chatId -> { key, messageId, ts } while waiting for a typed value.
+  const pending = new Map();
+  const PENDING_TTL_MS = 5 * 60 * 1000;
+
+  b.setMyCommands([
+    { command: 'menu', description: 'Open the control panel' },
+    { command: 'status', description: 'Show status + buttons' },
+    { command: 'starttrading', description: 'Start trading' },
+    { command: 'stoptrading', description: 'Stop trading' },
+    { command: 'setcapital', description: 'Solana capital % per trade' },
+    { command: 'setbsccapital', description: 'BSC capital % per trade' },
+    { command: 'help', description: 'All commands' },
+  ]).catch((err) => console.error('[telegram] setMyCommands failed:', err.message));
+
+  const send = (chatId, v) => b.sendMessage(chatId, v.text, { reply_markup: v.reply_markup });
+
+  async function show(chatId, messageId, v) {
+    try {
+      await b.editMessageText(v.text, { chat_id: chatId, message_id: messageId, reply_markup: v.reply_markup });
+    } catch (err) {
+      if (/message is not modified/i.test(err.message)) return; // nothing changed — fine
+      throw err;
+    }
   }
 
+  const fail = (chatId, err) => b.sendMessage(chatId, `Failed: ${err.message}`);
+
+  // ---- basic commands ----
   b.onText(/^\/start\b/, async (msg) => {
     const intro =
       `Meme coin scanner online.\nYour chat ID: ${msg.chat.id}\n` +
       (TELEGRAM_CHAT_ID ? '' : '⚠️ TELEGRAM_CHAT_ID is not set — set it to this value on Railway so only you can control the bot.\n');
     await b.sendMessage(msg.chat.id, intro);
-    if (isAuthorized(msg.chat.id)) await replyWithStatus(msg.chat.id);
+    if (isAuthorized(msg.chat.id)) await send(msg.chat.id, mainView(getConfig()));
   });
 
   b.onText(/^\/help\b/, (msg) => {
     if (!isAuthorized(msg.chat.id)) return;
-    b.sendMessage(msg.chat.id, HELP_TEXT);
+    send(msg.chat.id, helpView());
   });
 
-  b.onText(/^\/status\b/, (msg) => {
+  b.onText(/^\/(menu|status)\b/i, (msg) => {
     if (!isAuthorized(msg.chat.id)) return;
-    replyWithStatus(msg.chat.id);
+    send(msg.chat.id, mainView(getConfig()));
+  });
+
+  b.onText(/^\/cancel\b/i, (msg) => {
+    if (!isAuthorized(msg.chat.id)) return;
+    pending.delete(msg.chat.id);
+    send(msg.chat.id, mainView(getConfig(), 'Cancelled.'));
   });
 
   b.onText(/^\/(stoptrading|pause)\b/i, async (msg) => {
     if (!isAuthorized(msg.chat.id)) return;
     try {
       await updateConfig({ paused: true });
-      await replyWithStatus(msg.chat.id, '⏹ Trading stopped. No new positions will be entered.');
+      await send(msg.chat.id, mainView(getConfig(), '⏹ Trading stopped. No new positions will be entered.'));
     } catch (err) {
-      b.sendMessage(msg.chat.id, `Failed: ${err.message}`);
+      fail(msg.chat.id, err);
     }
   });
 
@@ -119,54 +366,91 @@ function start() {
     if (!isAuthorized(msg.chat.id)) return;
     try {
       await updateConfig({ paused: false });
-      await replyWithStatus(msg.chat.id, '▶️ Trading started.');
+      await send(msg.chat.id, mainView(getConfig(), '▶️ Trading started.'));
     } catch (err) {
-      b.sendMessage(msg.chat.id, `Failed: ${err.message}`);
+      fail(msg.chat.id, err);
     }
   });
 
-  b.onText(/^\/setmax (\d+)/, async (msg, match) => {
+  b.onText(/^\/setrisk(?:@\w+)?(?:\s+(low_?medium|low))?\s*$/i, async (msg, match) => {
     if (!isAuthorized(msg.chat.id)) return;
-    try {
-      await updateConfig({ max_tokens_per_day: Number(match[1]) });
-      await replyWithStatus(msg.chat.id, `✅ Daily quota set to ${match[1]}.`);
-    } catch (err) {
-      b.sendMessage(msg.chat.id, `Failed: ${err.message}`);
-    }
-  });
-
-  b.onText(/^\/setrisk (low|lowmedium)/i, async (msg, match) => {
-    if (!isAuthorized(msg.chat.id)) return;
+    if (!match[1]) return send(msg.chat.id, riskView(getConfig()));
     const tier = match[1].toLowerCase() === 'low' ? 'LOW' : 'LOW_MEDIUM';
     try {
-      await updateConfig({ min_recommend_tier: tier });
-      await replyWithStatus(msg.chat.id, `✅ Minimum recommend tier set to ${tier}.`);
+      await updateConfig({ minRecommendTier: tier });
+      await send(msg.chat.id, riskView(getConfig(), `✅ Minimum recommend tier set to ${tier}.`));
     } catch (err) {
-      b.sendMessage(msg.chat.id, `Failed: ${err.message}`);
+      fail(msg.chat.id, err);
     }
   });
 
-  b.onText(/^\/solana (on|off)/i, async (msg, match) => {
+  b.onText(/^\/(solana|bsc)(?:@\w+)?\s+(on|off)\s*$/i, async (msg, match) => {
     if (!isAuthorized(msg.chat.id)) return;
+    const chain = match[1].toLowerCase();
+    const on = match[2].toLowerCase() === 'on';
     try {
-      await updateConfig({ enable_solana: match[1].toLowerCase() === 'on' });
-      await replyWithStatus(msg.chat.id, `✅ Solana ${match[1]}.`);
+      await updateConfig(chain === 'solana' ? { enableSolana: on } : { enableBsc: on });
+      await send(msg.chat.id, mainView(getConfig(), `✅ ${chain === 'solana' ? 'Solana' : 'BSC'} ${on ? 'ON' : 'OFF'}.`));
     } catch (err) {
-      b.sendMessage(msg.chat.id, `Failed: ${err.message}`);
+      fail(msg.chat.id, err);
     }
   });
 
-  b.onText(/^\/bsc (on|off)/i, async (msg, match) => {
-    if (!isAuthorized(msg.chat.id)) return;
+  // ---- numeric settings: /setcapital 12.5 etc. (no number => opens buttons) ----
+  for (const [key, def] of Object.entries(SETTINGS)) {
+    const re = new RegExp(`^\\/${def.cmd}(?:@\\w+)?(?:\\s+(\\S+))?\\s*$`, 'i');
+    b.onText(re, async (msg, match) => {
+      if (!isAuthorized(msg.chat.id)) return;
+      if (!match[1]) return send(msg.chat.id, pickerView(key, getConfig()));
+      const res = validate(def, parseNumber(match[1]));
+      if (res.error) return b.sendMessage(msg.chat.id, `❌ ${res.error}`);
+      try {
+        await updateConfig({ [key]: res.value });
+        await send(msg.chat.id, pickerView(key, getConfig(), `✅ Set to ${fmt(res.value)}${def.unit}.`));
+      } catch (err) {
+        fail(msg.chat.id, err);
+      }
+    });
+  }
+
+  // ---- typed values after tapping "✏️ Type your own value" ----
+  b.on('message', async (msg) => {
+    const chatId = msg.chat.id;
+    const text = (msg.text || '').trim();
+    if (!text) return;
+    if (text.startsWith('/')) {
+      if (!/^\/cancel\b/i.test(text)) pending.delete(chatId); // any other command abandons the prompt
+      return;
+    }
+    const p = pending.get(chatId);
+    if (!p) return;
+    if (!isAuthorized(chatId)) return;
+    if (Date.now() - p.ts > PENDING_TTL_MS) {
+      pending.delete(chatId);
+      return;
+    }
+
+    const def = SETTINGS[p.key];
+    const res = validate(def, parseNumber(text));
+    if (res.error) {
+      return b.sendMessage(chatId, `❌ ${res.error} Try again, or /cancel.`);
+    }
     try {
-      await updateConfig({ enable_bsc: match[1].toLowerCase() === 'on' });
-      await replyWithStatus(msg.chat.id, `✅ BSC ${match[1]}.`);
+      await updateConfig({ [p.key]: res.value });
+      pending.delete(chatId);
+      b.deleteMessage(chatId, msg.message_id).catch(() => {}); // tidy up the typed number (best effort)
+      const v = pickerView(p.key, getConfig(), `✅ Set to ${fmt(res.value)}${def.unit}.`);
+      try {
+        await show(chatId, p.messageId, v);
+      } catch (_) {
+        await send(chatId, v);
+      }
     } catch (err) {
-      b.sendMessage(msg.chat.id, `Failed: ${err.message}`);
+      fail(chatId, err);
     }
   });
 
-  // Button taps — same actions as the commands above, no typing required.
+  // ---- button taps ----
   b.on('callback_query', async (query) => {
     const chatId = query.message.chat.id;
     const messageId = query.message.message_id;
@@ -175,37 +459,112 @@ function start() {
       return b.answerCallbackQuery(query.id, { text: 'Not authorized.' });
     }
 
+    const [action, arg1, arg2] = String(query.data || '').split(':');
+    let toast;
+    let next;
+
     try {
-      if (query.data === 'help') {
-        await b.answerCallbackQuery(query.id);
-        return b.sendMessage(chatId, HELP_TEXT);
+      pending.delete(chatId); // leaving a "type a value" prompt cancels it, unless we set it again below
+
+      switch (action) {
+        case 'menu':
+        case 'status':
+          toast = action === 'status' ? 'Refreshed' : undefined;
+          await refresh();
+          next = mainView(getConfig());
+          break;
+
+        case 'help':
+          next = helpView();
+          break;
+
+        case 'pause':
+          await updateConfig({ paused: true });
+          toast = '⏹ Trading stopped';
+          next = mainView(getConfig());
+          break;
+
+        case 'resume':
+          await updateConfig({ paused: false });
+          toast = '▶️ Trading started';
+          next = mainView(getConfig());
+          break;
+
+        case 'toggle_solana': {
+          const on = !getConfig().enableSolana;
+          await updateConfig({ enableSolana: on });
+          toast = `Solana ${on ? 'ON' : 'OFF'}`;
+          next = mainView(getConfig());
+          break;
+        }
+
+        case 'toggle_bsc': {
+          const on = !getConfig().enableBsc;
+          await updateConfig({ enableBsc: on });
+          toast = `BSC ${on ? 'ON' : 'OFF'}`;
+          next = mainView(getConfig());
+          break;
+        }
+
+        case 'm': // sub-menus
+          next = arg1 === 'cap' ? capitalView(getConfig()) : arg1 === 'risk' ? riskView(getConfig()) : arg1 === 'filters' ? filtersView(getConfig()) : mainView(getConfig());
+          break;
+
+        case 'v': // open a value picker
+          if (!SETTINGS[arg1]) throw new Error('Unknown setting');
+          next = pickerView(arg1, getConfig());
+          break;
+
+        case 's': { // set to a preset
+          const def = SETTINGS[arg1];
+          if (!def) throw new Error('Unknown setting');
+          const res = validate(def, arg2);
+          if (res.error) throw new Error(res.error);
+          await updateConfig({ [arg1]: res.value });
+          toast = `✅ ${fmt(res.value)}${def.unit}`;
+          next = pickerView(arg1, getConfig());
+          break;
+        }
+
+        case 'd': { // nudge up/down
+          const def = SETTINGS[arg1];
+          if (!def) throw new Error('Unknown setting');
+          const cur = Number(getConfig()[arg1]);
+          const target = clamp(round4(cur + Number(arg2)), def.min, def.max);
+          if (target === cur) {
+            toast = Number(arg2) > 0 ? 'Already at the maximum' : 'Already at the minimum';
+          } else {
+            await updateConfig({ [arg1]: def.int ? Math.round(target) : target });
+            toast = `✅ ${fmt(target)}${def.unit}`;
+          }
+          next = pickerView(arg1, getConfig());
+          break;
+        }
+
+        case 'c': // ask for a typed value
+          if (!SETTINGS[arg1]) throw new Error('Unknown setting');
+          pending.set(chatId, { key: arg1, messageId, ts: Date.now() });
+          next = customPromptView(arg1);
+          break;
+
+        case 't': { // risk tier
+          const tier = arg1 === 'LOW' ? 'LOW' : 'LOW_MEDIUM';
+          await updateConfig({ minRecommendTier: tier });
+          toast = `Tier: ${tier === 'LOW' ? 'LOW only' : 'LOW + MEDIUM'}`;
+          next = riskView(getConfig());
+          break;
+        }
+
+        default:
+          toast = 'Unknown button — open /menu';
+          next = mainView(getConfig());
       }
 
-      if (query.data === 'pause') {
-        await updateConfig({ paused: true });
-        await b.answerCallbackQuery(query.id, { text: '⏹ Trading stopped' });
-      } else if (query.data === 'resume') {
-        await updateConfig({ paused: false });
-        await b.answerCallbackQuery(query.id, { text: '▶️ Trading started' });
-      } else if (query.data === 'toggle_solana') {
-        await updateConfig({ enable_solana: !getConfig().enableSolana });
-        await b.answerCallbackQuery(query.id, { text: 'Solana toggled' });
-      } else if (query.data === 'toggle_bsc') {
-        await updateConfig({ enable_bsc: !getConfig().enableBsc });
-        await b.answerCallbackQuery(query.id, { text: 'BSC toggled' });
-      } else if (query.data === 'status') {
-        await b.answerCallbackQuery(query.id, { text: 'Refreshed' });
-      }
-
-      const cfg = getConfig();
-      await b.editMessageText(statusText(cfg), {
-        chat_id: chatId,
-        message_id: messageId,
-        ...controlKeyboard(cfg),
-      });
+      await b.answerCallbackQuery(query.id, toast ? { text: toast } : undefined);
+      await show(chatId, messageId, next);
     } catch (err) {
       console.error('[telegram] callback_query failed:', err.message);
-      b.answerCallbackQuery(query.id, { text: `Failed: ${err.message}` }).catch(() => {});
+      b.answerCallbackQuery(query.id, { text: `Failed: ${err.message}`.slice(0, 190), show_alert: true }).catch(() => {});
     }
   });
 

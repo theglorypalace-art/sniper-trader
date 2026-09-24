@@ -34,7 +34,8 @@ module.exports = {
   SOL_MINT: 'So11111111111111111111111111111111111111112',
 
   CAPITAL_PCT: Number(process.env.CAPITAL_PCT || 5), // % of wallet SOL balance per snipe
-  MAX_POSITION_SOL: Number(process.env.MAX_POSITION_SOL || 0.5), // hard cap regardless of CAPITAL_PCT
+  MAX_POSITION_SOL: Number(process.env.MAX_POSITION_SOL || 0.5), // hard cap regardless of CAPITAL_PCT (0 = no cap)
+  SOL_FEE_RESERVE: Number(process.env.SOL_FEE_RESERVE || 0.01), // SOL always left in the wallet for fees/rent, even at 100%
   MAX_CONCURRENT_POSITIONS: Number(process.env.MAX_CONCURRENT_POSITIONS || 1),
   SLIPPAGE_BPS: Number(process.env.SLIPPAGE_BPS || 500), // 5% — thin new-launch liquidity needs room
   PRIORITY_FEE_LAMPORTS: Number(process.env.PRIORITY_FEE_LAMPORTS || 100000),
@@ -58,7 +59,8 @@ module.exports = {
   WBNB_ADDRESS: process.env.WBNB_ADDRESS || '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c',
 
   BSC_CAPITAL_PCT: Number(process.env.BSC_CAPITAL_PCT || 5),
-  BSC_MAX_POSITION_BNB: Number(process.env.BSC_MAX_POSITION_BNB || 0.1),
+  BSC_MAX_POSITION_BNB: Number(process.env.BSC_MAX_POSITION_BNB || 0.1), // 0 = no cap
+  BNB_FEE_RESERVE: Number(process.env.BNB_FEE_RESERVE || 0.003), // BNB always left in the wallet for gas, even at 100%
   BSC_MAX_CONCURRENT_POSITIONS: Number(process.env.BSC_MAX_CONCURRENT_POSITIONS || 1),
   BSC_SLIPPAGE_BPS: Number(process.env.BSC_SLIPPAGE_BPS || 700), // fresh PancakeSwap pools are typically thinner than pump.fun's own curve
 

@@ -24,47 +24,49 @@ const SETTINGS = {
     cmd: 'setcapital',
     title: '🟣 Solana — capital per trade',
     unit: '%',
-    min: 0.1,
-    max: 95, // keep a little back for fees / rent
-    presets: [1, 2, 5, 10, 15, 25, 50, 75],
+    min: 0.01,
+    max: 100,
+    presets: [1, 2, 5, 10, 25, 50, 75, 100],
     steps: [1, 5],
     parent: 'm:cap',
     warnAbove: 25,
-    describe: (c) => `Each Solana buy uses this % of your SOL balance, capped at ${fmt(c.maxPositionSol)} SOL (the smaller of the two applies).`,
+    describe: (c) => `Each Solana buy uses this % of your SOL balance. ${capNote(c.maxPositionSol, 'SOL')} A small SOL reserve is always kept for fees.`,
   },
   bscCapitalPct: {
     cmd: 'setbsccapital',
     title: '🟡 BSC — capital per trade',
     unit: '%',
-    min: 0.1,
-    max: 95,
-    presets: [1, 2, 5, 10, 15, 25, 50, 75],
+    min: 0.01,
+    max: 100,
+    presets: [1, 2, 5, 10, 25, 50, 75, 100],
     steps: [1, 5],
     parent: 'm:cap',
     warnAbove: 25,
-    describe: (c) => `Each BSC buy uses this % of your BNB balance, capped at ${fmt(c.bscMaxPositionBnb)} BNB (the smaller of the two applies).`,
+    describe: (c) => `Each BSC buy uses this % of your BNB balance. ${capNote(c.bscMaxPositionBnb, 'BNB')} A small BNB reserve is always kept for gas.`,
   },
   maxPositionSol: {
     cmd: 'setmaxpos',
     title: '🟣 Solana — max per trade',
     unit: ' SOL',
-    min: 0.001,
-    max: 1000,
-    presets: [0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10],
+    min: 0,
+    max: 100000,
+    zeroLabel: 'No cap',
+    presets: [0, 0.1, 0.25, 0.5, 1, 2, 5, 10],
     steps: [0.05, 0.25],
     parent: 'm:cap',
-    describe: (c) => `Hard ceiling on one Solana buy, no matter what the capital % says. Currently ${fmt(c.capitalPct)}% of balance.`,
+    describe: (c) => `Hard ceiling on one Solana buy, no matter what the capital % says (now ${fmt(c.capitalPct)}% of balance). Choose No cap to let the % alone decide the size.`,
   },
   bscMaxPositionBnb: {
     cmd: 'setbscmaxpos',
     title: '🟡 BSC — max per trade',
     unit: ' BNB',
-    min: 0.001,
-    max: 1000,
-    presets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5],
+    min: 0,
+    max: 100000,
+    zeroLabel: 'No cap',
+    presets: [0, 0.05, 0.1, 0.25, 0.5, 1, 2, 5],
     steps: [0.01, 0.05],
     parent: 'm:cap',
-    describe: (c) => `Hard ceiling on one BSC buy, no matter what the capital % says. Currently ${fmt(c.bscCapitalPct)}% of balance.`,
+    describe: (c) => `Hard ceiling on one BSC buy, no matter what the capital % says (now ${fmt(c.bscCapitalPct)}% of balance). Choose No cap to let the % alone decide the size.`,
   },
   maxTokensPerDay: {
     cmd: 'setmax',
@@ -103,6 +105,13 @@ const SETTINGS = {
 };
 
 const fmt = (n) => String(Number(Number(n).toFixed(4)));
+// Display a setting's value, e.g. "12.5%", "0.5 SOL", or "No cap" for a 0 cap.
+const valText = (def, v) => (def.zeroLabel && Number(v) === 0 ? def.zeroLabel : `${fmt(v)}${def.unit}`);
+const capLabel = (v, unit) => (Number(v) > 0 ? `max ${fmt(v)} ${unit}` : 'no cap');
+const capNote = (v, unit) =>
+  Number(v) > 0
+    ? `Capped at ${fmt(v)} ${unit} per trade — the smaller of the two applies (raise or remove the cap under Max per trade).`
+    : `No max-per-trade cap is set, so this % alone decides the size.`;
 const round4 = (n) => Math.round(n * 10000) / 10000;
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
 
@@ -111,15 +120,17 @@ function validate(def, raw) {
   if (raw === '' || raw == null || !Number.isFinite(n)) return { error: 'That is not a number.' };
   if (def.int && !Number.isInteger(n)) return { error: 'Please enter a whole number.' };
   if (n < def.min || n > def.max) {
-    return { error: `Must be between ${fmt(def.min)} and ${fmt(def.max)}${def.unit}.` };
+    return { error: def.zeroLabel ? `Enter an amount up to ${fmt(def.max)}${def.unit}, or 0 for no cap.` : `Must be between ${fmt(def.min)} and ${fmt(def.max)}${def.unit}.` };
   }
   return { value: def.int ? n : round4(n) };
 }
 
-// Accepts "12", "12.5", "12,5", "12%", " 0.25 SOL " ...
-function parseNumber(text) {
-  const cleaned = String(text).trim().replace(',', '.').replace(/\s*(%|sol|bnb)\s*$/i, '');
-  return cleaned;
+// Accepts "12", "12.5", "12,5", "12%", " 0.25 SOL " ... and, for cap settings,
+// words like "none" / "no cap" / "off" / "unlimited" (= 0 = no cap).
+function parseInput(def, text) {
+  const t = String(text).trim();
+  if (def.zeroLabel && /^(none|no\s*cap|nocap|off|unlimited|no\s*limit|remove)$/i.test(t)) return '0';
+  return t.replace(',', '.').replace(/\s*(%|sol|bnb)\s*$/i, '');
 }
 
 // ---------------------------------------------------------------------
@@ -165,7 +176,7 @@ function statusText(cfg) {
     DRY_RUN ? 'Mode: 🧪 DRY RUN (no real trades)' : 'Mode: 🔴 LIVE (real trades)',
     '',
     `Chains: Solana ${cfg.enableSolana ? 'ON' : 'OFF'} | BSC ${cfg.enableBsc ? 'ON' : 'OFF'}`,
-    `Capital per trade: ${fmt(cfg.capitalPct)}% SOL (max ${fmt(cfg.maxPositionSol)}) | ${fmt(cfg.bscCapitalPct)}% BNB (max ${fmt(cfg.bscMaxPositionBnb)})`,
+    `Capital per trade: ${fmt(cfg.capitalPct)}% SOL (${capLabel(cfg.maxPositionSol, 'SOL')}) | ${fmt(cfg.bscCapitalPct)}% BNB (${capLabel(cfg.bscMaxPositionBnb, 'BNB')})`,
     `Min tier to recommend: ${cfg.minRecommendTier === 'LOW' ? 'LOW only' : 'LOW + MEDIUM'}`,
     `Daily quota used: ${getDailyCount()}/${cfg.maxTokensPerDay}`,
     `Risk limits: dev% ≤ ${fmt(cfg.maxDevPercent)} | top10% ≤ ${fmt(cfg.maxTop10Percent)}`,
@@ -194,13 +205,14 @@ function capitalView(cfg, banner) {
   return view(
     (banner ? `${banner}\n\n` : '') +
       `💰 Capital per trade\n\n` +
-      `🟣 Solana: ${fmt(cfg.capitalPct)}% of SOL balance, max ${fmt(cfg.maxPositionSol)} SOL\n` +
-      `🟡 BSC: ${fmt(cfg.bscCapitalPct)}% of BNB balance, max ${fmt(cfg.bscMaxPositionBnb)} BNB\n\n` +
-      `Each buy uses the % of your balance but never more than the max — the smaller of the two applies. ` +
-      `Raise the max too if you want bigger buys. Changes apply to the very next trade.`,
+      `🟣 Solana: ${fmt(cfg.capitalPct)}% of SOL balance (${capLabel(cfg.maxPositionSol, 'SOL')})\n` +
+      `🟡 BSC: ${fmt(cfg.bscCapitalPct)}% of BNB balance (${capLabel(cfg.bscMaxPositionBnb, 'BNB')})\n\n` +
+      `Set any % from 0.01 to 100. Each buy uses that % of your balance, but never more than the "max per trade" cap — ` +
+      `raise it or choose No cap so it doesn't limit you. A small amount is always kept back for fees. ` +
+      `Changes apply to the very next trade.`,
     [
       [btn(`🟣 Solana % (${fmt(cfg.capitalPct)}%)`, 'v:capitalPct'), btn(`🟡 BSC % (${fmt(cfg.bscCapitalPct)}%)`, 'v:bscCapitalPct')],
-      [btn(`🟣 SOL max (${fmt(cfg.maxPositionSol)})`, 'v:maxPositionSol'), btn(`🟡 BNB max (${fmt(cfg.bscMaxPositionBnb)})`, 'v:bscMaxPositionBnb')],
+      [btn(`🟣 SOL max (${Number(cfg.maxPositionSol) > 0 ? fmt(cfg.maxPositionSol) : 'no cap'})`, 'v:maxPositionSol'), btn(`🟡 BNB max (${Number(cfg.bscMaxPositionBnb) > 0 ? fmt(cfg.bscMaxPositionBnb) : 'no cap'})`, 'v:bscMaxPositionBnb')],
       [btn('⬅️ Back', 'menu')],
     ]
   );
@@ -238,7 +250,9 @@ function pickerView(key, cfg, banner) {
 
   for (let i = 0; i < def.presets.length; i += 4) {
     rows.push(
-      def.presets.slice(i, i + 4).map((p) => btn(`${Number(cur) === p ? '✅ ' : ''}${fmt(p)}${shortUnit}`, `s:${key}:${p}`))
+      def.presets.slice(i, i + 4).map((p) =>
+        btn(`${Number(cur) === p ? '✅ ' : ''}${def.zeroLabel && p === 0 ? '♾ ' + def.zeroLabel : fmt(p) + shortUnit}`, `s:${key}:${p}`)
+      )
     );
   }
   const [small, large] = def.steps;
@@ -254,8 +268,8 @@ function pickerView(key, cfg, banner) {
   const warn = def.warnAbove && Number(cur) > def.warnAbove ? `\n⚠️ That's a large share of your balance — one bad token can hurt.\n` : '';
   return view(
     (banner ? `${banner}\n\n` : '') +
-      `${def.title}\n\nCurrent: ${fmt(cur)}${def.unit}\n${warn}\n${def.describe(cfg)}\n\n` +
-      `Range ${fmt(def.min)}–${fmt(def.max)}${def.unit}. Tap a preset, nudge with −/+, or type your own.`,
+      `${def.title}\n\nCurrent: ${valText(def, cur)}\n${warn}\n${def.describe(cfg)}\n\n` +
+      `${def.zeroLabel ? `Any amount, or 0 for ${def.zeroLabel.toLowerCase()}.` : `Range ${fmt(def.min)}–${fmt(def.max)}${def.unit}.`} Tap a preset, nudge with −/+, or type your own.`,
     rows
   );
 }
@@ -263,7 +277,7 @@ function pickerView(key, cfg, banner) {
 function customPromptView(key) {
   const def = SETTINGS[key];
   return view(
-    `✏️ ${def.title}\n\nType the new value and send it (${fmt(def.min)}–${fmt(def.max)}${def.unit}${def.int ? ', whole number' : ''}).\nExample: ${fmt(def.presets[2])}`,
+    `✏️ ${def.title}\n\nType the new value and send it (${def.zeroLabel ? `any amount in${def.unit}, or "none" for no cap` : `${fmt(def.min)}–${fmt(def.max)}${def.unit}`}${def.int ? ', whole number' : ''}).\nExample: ${fmt(def.presets[def.zeroLabel ? 3 : 2])}`,
     [[btn('✖️ Cancel', `v:${key}`)]]
   );
 }
@@ -275,10 +289,10 @@ const HELP_TEXT =
   `/stoptrading or /pause — stop entering new positions (open ones are still monitored/sold)\n` +
   `/solana on|off, /bsc on|off — toggle a chain's trading\n\n` +
   `Capital per trade:\n` +
-  `/setcapital <pct> — Solana % of SOL balance per buy (0.1–95)\n` +
+  `/setcapital <pct> — Solana % of SOL balance per buy (any value 0.01–100)\n` +
   `/setbsccapital <pct> — BSC % of BNB balance per buy\n` +
-  `/setmaxpos <sol> — Solana max SOL per buy\n` +
-  `/setbscmaxpos <bnb> — BSC max BNB per buy\n\n` +
+  `/setmaxpos <sol|none> — Solana max SOL per buy (none = no cap)\n` +
+  `/setbscmaxpos <bnb|none> — BSC max BNB per buy (none = no cap)\n\n` +
   `Selectivity & safety:\n` +
   `/setmax <n> — max tokens per day\n` +
   `/setrisk low|lowmedium — only LOW risk, or LOW+MEDIUM\n` +
@@ -402,11 +416,11 @@ function start() {
     b.onText(re, async (msg, match) => {
       if (!isAuthorized(msg.chat.id)) return;
       if (!match[1]) return send(msg.chat.id, pickerView(key, getConfig()));
-      const res = validate(def, parseNumber(match[1]));
+      const res = validate(def, parseInput(def, match[1]));
       if (res.error) return b.sendMessage(msg.chat.id, `❌ ${res.error}`);
       try {
         await updateConfig({ [key]: res.value });
-        await send(msg.chat.id, pickerView(key, getConfig(), `✅ Set to ${fmt(res.value)}${def.unit}.`));
+        await send(msg.chat.id, pickerView(key, getConfig(), `✅ Set to ${valText(def, res.value)}.`));
       } catch (err) {
         fail(msg.chat.id, err);
       }
@@ -431,7 +445,7 @@ function start() {
     }
 
     const def = SETTINGS[p.key];
-    const res = validate(def, parseNumber(text));
+    const res = validate(def, parseInput(def, text));
     if (res.error) {
       return b.sendMessage(chatId, `❌ ${res.error} Try again, or /cancel.`);
     }
@@ -439,7 +453,7 @@ function start() {
       await updateConfig({ [p.key]: res.value });
       pending.delete(chatId);
       b.deleteMessage(chatId, msg.message_id).catch(() => {}); // tidy up the typed number (best effort)
-      const v = pickerView(p.key, getConfig(), `✅ Set to ${fmt(res.value)}${def.unit}.`);
+      const v = pickerView(p.key, getConfig(), `✅ Set to ${valText(def, res.value)}.`);
       try {
         await show(chatId, p.messageId, v);
       } catch (_) {
@@ -521,7 +535,7 @@ function start() {
           const res = validate(def, arg2);
           if (res.error) throw new Error(res.error);
           await updateConfig({ [arg1]: res.value });
-          toast = `✅ ${fmt(res.value)}${def.unit}`;
+          toast = `✅ ${valText(def, res.value)}`;
           next = pickerView(arg1, getConfig());
           break;
         }
@@ -535,7 +549,7 @@ function start() {
             toast = Number(arg2) > 0 ? 'Already at the maximum' : 'Already at the minimum';
           } else {
             await updateConfig({ [arg1]: def.int ? Math.round(target) : target });
-            toast = `✅ ${fmt(target)}${def.unit}`;
+            toast = `✅ ${valText(def, target)}`;
           }
           next = pickerView(arg1, getConfig());
           break;

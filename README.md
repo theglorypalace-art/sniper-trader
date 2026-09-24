@@ -163,7 +163,7 @@ entirely if you only want one.
 3. Set `TELEGRAM_CHAT_ID` to that value on Railway and redeploy — this locks control to just you (without it, anyone who finds your bot could pause it or change your filters).
 4. From then on, send `/menu` and control everything with buttons — start/stop trading, Solana/BSC on/off, **capital % per trade** (presets, −/+ nudges, or type any value), max size per trade, daily limit, risk tier, and the dev/top-10 filters. Every setting also has a typed command (`/setcapital 12.5`, `/setbsccapital`, `/setmaxpos`, `/setbscmaxpos`, `/setmax`, `/setrisk low|lowmedium`, `/setdev`, `/settop10`, `/solana on|off`, `/bsc on|off`; send one with no number to get its buttons). Changes apply to the very next trade, no redeploy. You also get automatic push notifications the moment a token is recommended, bought, or sold.
 
-   Note: each buy uses the **smaller** of *capital %* and the *max per trade* cap, so raise both if you want bigger buys.
+   Sizing rule: each buy uses `capital %` of the wallet balance (any value 0.01–100), limited only by the *max per trade* cap — set that cap to **0 / "No cap"** to let the % alone decide — and by a small fee reserve (`SOL_FEE_RESERVE` = 0.01 SOL, `BNB_FEE_RESERVE` = 0.003 BNB) that's always left in the wallet so even 100% can't leave you unable to pay gas or sell.
 
 ### 4. Dashboard on Vercel (optional)
 

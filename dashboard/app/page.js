@@ -235,38 +235,46 @@ export default function DashboardPage() {
               />
             </Field>
 
-            <Field label="Solana: capital % / trade">
+            <Field label="Solana: capital % / trade (0.01–100)">
               <input
                 type="number"
+                min="0.01"
+                max="100"
+                step="any"
                 value={form.capital_pct}
                 onChange={(e) => setForm({ ...form, capital_pct: Number(e.target.value) })}
                 style={inputStyle}
               />
             </Field>
 
-            <Field label="Solana: max SOL / trade">
+            <Field label="Solana: max SOL / trade (0 = no cap)">
               <input
                 type="number"
-                step="0.01"
+                min="0"
+                step="any"
                 value={form.max_position_sol}
                 onChange={(e) => setForm({ ...form, max_position_sol: Number(e.target.value) })}
                 style={inputStyle}
               />
             </Field>
 
-            <Field label="BSC: capital % / trade">
+            <Field label="BSC: capital % / trade (0.01–100)">
               <input
                 type="number"
+                min="0.01"
+                max="100"
+                step="any"
                 value={form.bsc_capital_pct}
                 onChange={(e) => setForm({ ...form, bsc_capital_pct: Number(e.target.value) })}
                 style={inputStyle}
               />
             </Field>
 
-            <Field label="BSC: max BNB / trade">
+            <Field label="BSC: max BNB / trade (0 = no cap)">
               <input
                 type="number"
-                step="0.01"
+                min="0"
+                step="any"
                 value={form.bsc_max_position_bnb}
                 onChange={(e) => setForm({ ...form, bsc_max_position_bnb: Number(e.target.value) })}
                 style={inputStyle}

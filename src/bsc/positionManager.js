@@ -1,5 +1,6 @@
 const { ethers } = require('ethers');
-const { BSC_MAX_CONCURRENT_POSITIONS, PRICE_POLL_INTERVAL_MS, DRY_RUN } = require('../config');
+const { BSC_MAX_CONCURRENT_POSITIONS, PRICE_POLL_INTERVAL_MS, DRY_RUN, BNB_FEE_RESERVE } = require('../config');
+const { computeTradeSize } = require('../trading/sizing');
 const { assessAndGate } = require('../analysis/riskEngine');
 const { quoteSell, buyWithBnb, sellForBnb, getTokenDecimals } = require('./pancakeswap');
 const { getBnbBalance, loadWallet } = require('./wallet');
@@ -79,13 +80,18 @@ async function tryEnterPosition(tokenAddress) {
 
   const wallet = loadWallet();
   const bnbBalance = await getBnbBalance();
-  const rawSize = bnbBalance * (liveCfg.bscCapitalPct / 100);
-  const sizeBnb = Math.min(rawSize, liveCfg.bscMaxPositionBnb);
+  const { size: sizeBnb, limitedBy } = computeTradeSize({
+    balance: bnbBalance,
+    pct: liveCfg.bscCapitalPct,
+    cap: liveCfg.bscMaxPositionBnb,
+    reserve: BNB_FEE_RESERVE,
+  });
 
   if (sizeBnb <= 0) {
-    console.log(`[position-bsc] skipping ${tokenAddress} — computed size non-positive (balance=${bnbBalance})`);
+    console.log(`[position-bsc] skipping ${tokenAddress} — computed size non-positive (balance=${bnbBalance}, ${limitedBy})`);
     return;
   }
+  console.log(`[position-bsc] sizing ${tokenAddress}: ${sizeBnb.toFixed(5)} BNB (${liveCfg.bscCapitalPct}% of ${Number(bnbBalance).toFixed(5)}; limited by ${limitedBy})`);
 
   const bnbAmountWei = ethers.parseEther(sizeBnb.toFixed(18));
 

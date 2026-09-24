@@ -25,6 +25,24 @@ export async function PATCH(request) {
     if (Object.keys(updates).length === 0) {
       return NextResponse.json({ error: 'No valid fields in request.' }, { status: 400 });
     }
+
+    // Sanity-check the sizing fields (capital % is free between 0.01 and 100;
+    // the per-trade caps accept 0 meaning "no cap").
+    const RANGES = {
+      capital_pct: [0.01, 100],
+      bsc_capital_pct: [0.01, 100],
+      max_position_sol: [0, 100000],
+      bsc_max_position_bnb: [0, 100000],
+    };
+    for (const [key, [lo, hi]] of Object.entries(RANGES)) {
+      if (key in updates) {
+        const n = Number(updates[key]);
+        if (!Number.isFinite(n) || n < lo || n > hi) {
+          return NextResponse.json({ error: `${key} must be a number between ${lo} and ${hi}.` }, { status: 400 });
+        }
+        updates[key] = n;
+      }
+    }
     updates.updated_by = 'dashboard';
 
     const supabase = getSupabase();

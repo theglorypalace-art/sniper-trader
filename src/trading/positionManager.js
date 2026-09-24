@@ -1,5 +1,6 @@
 const { LAMPORTS_PER_SOL } = require('@solana/web3.js');
-const { PRICE_POLL_INTERVAL_MS, MAX_CONCURRENT_POSITIONS, SOL_MINT, DRY_RUN } = require('../config');
+const { PRICE_POLL_INTERVAL_MS, MAX_CONCURRENT_POSITIONS, SOL_MINT, DRY_RUN, SOL_FEE_RESERVE } = require('../config');
+const { computeTradeSize } = require('./sizing');
 const { assessAndGate } = require('../analysis/riskEngine');
 const { getQuote, buySol, sellToSol } = require('./jupiter');
 const { getSolBalance, loadWallet } = require('../solana/wallet');
@@ -82,13 +83,18 @@ async function tryEnterPosition(mint) {
 
   const wallet = loadWallet();
   const solBalance = await getSolBalance();
-  const rawSize = solBalance * (liveCfg.capitalPct / 100);
-  const sizeSol = Math.min(rawSize, liveCfg.maxPositionSol);
+  const { size: sizeSol, limitedBy } = computeTradeSize({
+    balance: solBalance,
+    pct: liveCfg.capitalPct,
+    cap: liveCfg.maxPositionSol,
+    reserve: SOL_FEE_RESERVE,
+  });
 
   if (sizeSol <= 0) {
-    console.log(`[position] skipping ${mint} — computed size non-positive (balance=${solBalance})`);
+    console.log(`[position] skipping ${mint} — computed size non-positive (balance=${solBalance}, ${limitedBy})`);
     return;
   }
+  console.log(`[position] sizing ${mint}: ${sizeSol.toFixed(4)} SOL (${liveCfg.capitalPct}% of ${solBalance.toFixed(4)}; limited by ${limitedBy})`);
 
   const lamports = Math.floor(sizeSol * LAMPORTS_PER_SOL);
 

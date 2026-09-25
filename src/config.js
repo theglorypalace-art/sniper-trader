@@ -78,7 +78,7 @@ module.exports = {
 
   // How selective the scanner is — max tokens recommended/traded per UTC day.
   // (Fallback only if Supabase isn't configured — see src/live/liveConfig.js.)
-  MAX_TOKENS_PER_DAY: Number(process.env.MAX_TOKENS_PER_DAY || 15),
+  MAX_TOKENS_PER_DAY: Number(process.env.MAX_TOKENS_PER_DAY || 50),
 
   // ---- Live control layer (optional but recommended for 24/7 operation) ----
   // Without these, the bot still runs fine on static .env config — you

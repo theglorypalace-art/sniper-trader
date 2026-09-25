@@ -10,9 +10,9 @@ let cached = {
   enableBsc: staticConfig.ENABLE_BSC,
   // Allow LOW + MEDIUM + HIGH so the bot trades more in a volatile market.
   minRecommendTier: 'LOW_MEDIUM', // 'LOW' or 'LOW_MEDIUM' (HIGH is allowed when tradeable)
-  maxTokensPerDay: Math.max(staticConfig.MAX_TOKENS_PER_DAY, 15), // more slots per day
-  maxDevPercent: 45, // was 30 — accept higher creator holdings
-  maxTop10Percent: 85, // was 70
+  maxTokensPerDay: Math.max(staticConfig.MAX_TOKENS_PER_DAY, 50), // high daily quota
+  maxDevPercent: 99, // no practical hard cap (scoring only)
+  maxTop10Percent: 99, // no practical hard cap (scoring only)
   capitalPct: staticConfig.CAPITAL_PCT,
   maxPositionSol: staticConfig.MAX_POSITION_SOL,
   bscCapitalPct: staticConfig.BSC_CAPITAL_PCT,
@@ -20,15 +20,15 @@ let cached = {
   takeProfitPct: 0, // 0 = auto by risk tier (now 30-40%)
   stopLossPct: 0, // 0 = auto by risk tier
   maxHoldMin: 0, // 0 = auto by risk tier (now 5-8 min — exit fast)
-  maxRiskScore: 75, // was 50 — allow HIGH-tier scores through
+  maxRiskScore: 100, // allow almost everything that is sellable
   heartbeatMin: Number(process.env.HEARTBEAT_MIN || 60), // 0 = off
   // Separate, looser ceilings for MEDIUM (and HIGH uses overall maxRiskScore).
-  mediumMaxDevPercent: 55,
-  mediumMaxTop10Percent: 90,
-  mediumMaxScore: 75,
+  mediumMaxDevPercent: 99,
+  mediumMaxTop10Percent: 99,
+  mediumMaxScore: 100,
   // BSC-only: reject any token whose buy or sell tax exceeds these.
-  maxBuyTaxPct: 20,
-  maxSellTaxPct: 20,
+  maxBuyTaxPct: 50,
+  maxSellTaxPct: 50,
 };
 
 // The settings added by supabase/migrations/002_*.sql and 003_*.sql. Until

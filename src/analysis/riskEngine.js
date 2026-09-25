@@ -65,15 +65,15 @@ function exitPlanFor(tier) {
 
 function finalize(input) {
   const tier = tierFor(input.score);
-  // Allow LOW / MEDIUM / HIGH so more coins can trade in a volatile market.
-  // CRITICAL (and hard rejects like freeze/honeypot) still blocked.
-  const tradeable = tier === 'LOW' || tier === 'MEDIUM' || tier === 'HIGH';
+  // Aggressive mode: anything that survived hard rejects (freeze/honeypot/can't-sell)
+  // is tradeable — including HIGH and CRITICAL scores. User accepts the risk.
+  const tradeable = true;
   return {
     ...input,
     verdict: tier,
     tradeable,
     recommended: false, // set by assessAndGate once the live-config gate + daily quota are checked
-    exit: tradeable ? exitPlanFor(tier) : null,
+    exit: exitPlanFor(tier),
   };
 }
 
@@ -122,39 +122,19 @@ async function assessSolanaToken(mint, { requireSellable = true } = {}) {
     }
   }
 
-  const mediumOk = cfg.minRecommendTier === 'LOW_MEDIUM';
-  const devHardCap = mediumOk ? Math.max(maxDevPercent, cfg.mediumMaxDevPercent) : maxDevPercent;
-  const top10HardCap = mediumOk ? Math.max(maxTop10Percent, cfg.mediumMaxTop10Percent) : maxTop10Percent;
-
+  // Aggressive mode: never hard-reject on dev% / top10% — only score them.
+  // Only freeze + no-sell-route remain hard stops.
   if (devPercent != null) {
-    if (devPercent > devHardCap) {
-      return reject('solana', mint, `Creator/dev wallet holds ~${devPercent.toFixed(1)}% of supply — over your ${devHardCap}% limit.`);
-    }
-    if (devPercent > maxDevPercent) {
-      // Over the LOW-tier limit but within the looser MEDIUM allowance —
-      // don't reject, but weight it heavily enough that it can't land as LOW.
-      score += 40;
-      reasons.push(`Dev/creator wallet holds ~${devPercent.toFixed(1)}% of supply — above your LOW limit (${maxDevPercent}%) but within your MEDIUM allowance (${cfg.mediumMaxDevPercent}%).`);
-    } else {
-      score += Math.min(40, devPercent * 2);
-      reasons.push(`Dev/creator wallet holds ~${devPercent.toFixed(1)}% of supply.`);
-    }
+    score += Math.min(50, Math.floor(devPercent * 1.5));
+    reasons.push(`Dev/creator wallet holds ~${devPercent.toFixed(1)}% of supply.`);
   } else {
     reasons.push('Could not confirm dev wallet holding % from available data.');
-    score += 8;
+    score += 5;
   }
 
   if (top10Percent != null) {
-    if (top10Percent > top10HardCap) {
-      return reject('solana', mint, `Top 10 holders control ~${top10Percent.toFixed(1)}% of supply — over your ${top10HardCap}% limit.`);
-    }
-    if (top10Percent > maxTop10Percent) {
-      score += 25;
-      reasons.push(`Top 10 holders control ~${top10Percent.toFixed(1)}% of supply — above your LOW limit (${maxTop10Percent}%) but within your MEDIUM allowance (${cfg.mediumMaxTop10Percent}%).`);
-    } else {
-      if (top10Percent > 20) score += Math.min(25, top10Percent - 20);
-      reasons.push(`Top 10 holders control ~${top10Percent.toFixed(1)}% of supply.`);
-    }
+    if (top10Percent > 20) score += Math.min(30, Math.floor((top10Percent - 20) * 0.6));
+    reasons.push(`Top 10 holders control ~${top10Percent.toFixed(1)}% of supply.`);
   }
 
   const curveState = await getBondingCurveState(mint).catch(() => null);
@@ -245,73 +225,74 @@ async function assessBscToken(address) {
   try {
     sec = await getEvmTokenSecurity(address);
   } catch (err) {
-    return reject('bsc', address, `GoPlus lookup failed (${err.message}) — too risky to trade blind.`);
+    // Aggressive: missing GoPlus is a score penalty, not a hard reject.
+    return finalize({
+      chain: 'bsc',
+      address,
+      score: 60,
+      reasons: [`GoPlus lookup failed (${err.message}) — trading without full security data.`],
+      category: 'new',
+      isCommunityCoin: false,
+      devPercent: null,
+      top10Percent: null,
+      curveProgressPct: null,
+      migrated: null,
+    });
   }
   if (!sec) {
-    return reject('bsc', address, 'No security data available for this token yet — too new/unverified to trust.');
+    return finalize({
+      chain: 'bsc',
+      address,
+      score: 55,
+      reasons: ['No security data available yet — trading as unverified early token.'],
+      category: 'new',
+      isCommunityCoin: false,
+      devPercent: null,
+      top10Percent: null,
+      curveProgressPct: null,
+      migrated: null,
+    });
   }
 
+  // Only hard-stop on true can't-sell / can't-buy. Everything else is scored and traded.
   if (sec.is_honeypot === '1') {
     return reject('bsc', address, 'Flagged as a honeypot by GoPlus (can buy, cannot sell).');
   }
   if (sec.cannot_sell_all === '1') {
     return reject('bsc', address, 'Contract can prevent holders from selling all of their tokens in one go.');
   }
-  if (sec.is_open_source === '0') {
-    return reject('bsc', address, "Contract is not verified/open-source — can't assess it further.");
-  }
-  if (sec.selfdestruct === '1') {
-    return reject('bsc', address, 'Contract has a self-destruct function.');
-  }
 
-  const maxBuyTaxPct = cfg.maxBuyTaxPct ?? 15;
-  const maxSellTaxPct = cfg.maxSellTaxPct ?? 15;
   const buyTax = Number(sec.buy_tax || 0) * 100;
   const sellTax = Number(sec.sell_tax || 0) * 100;
   if (buyTax >= 100 || sellTax >= 100 || sec.cannot_buy === '1') {
     return reject('bsc', address, 'Cannot actually buy and/or sell this token right now.');
   }
-  if (buyTax > maxBuyTaxPct || sellTax > maxSellTaxPct) {
-    return reject('bsc', address, `Buy/sell tax too high (buy ${buyTax.toFixed(1)}%, sell ${sellTax.toFixed(1)}%) — over your ${maxBuyTaxPct}%/${maxSellTaxPct}% limit.`);
-  }
   if (buyTax + sellTax > 10) {
     score += 15;
     reasons.push(`Combined buy+sell tax is ${(buyTax + sellTax).toFixed(1)}% — eats into any quick exit.`);
   }
-
-  const mediumOk = cfg.minRecommendTier === 'LOW_MEDIUM';
-  const devHardCap = mediumOk ? Math.max(maxDevPercent, cfg.mediumMaxDevPercent) : maxDevPercent;
-  const top10HardCap = mediumOk ? Math.max(maxTop10Percent, cfg.mediumMaxTop10Percent) : maxTop10Percent;
+  if (sec.is_open_source === '0') {
+    score += 15;
+    reasons.push('Contract is not verified/open-source.');
+  }
+  if (sec.selfdestruct === '1') {
+    score += 25;
+    reasons.push('Contract has a self-destruct function.');
+  }
 
   const devPercent = sec.owner_percent != null && sec.owner_percent !== '' ? Number(sec.owner_percent) * 100 : null;
   if (devPercent != null) {
-    if (devPercent > devHardCap) {
-      return reject('bsc', address, `Owner wallet holds ~${devPercent.toFixed(1)}% of supply — over your ${devHardCap}% limit.`);
-    }
-    if (devPercent > maxDevPercent) {
-      score += 40;
-      reasons.push(`Owner/dev wallet holds ~${devPercent.toFixed(1)}% of supply — above your LOW limit (${maxDevPercent}%) but within your MEDIUM allowance (${cfg.mediumMaxDevPercent}%).`);
-    } else {
-      score += Math.min(40, devPercent * 2);
-      reasons.push(`Owner/dev wallet holds ~${devPercent.toFixed(1)}% of supply.`);
-    }
+    score += Math.min(50, Math.floor(devPercent * 1.5));
+    reasons.push(`Owner/dev wallet holds ~${devPercent.toFixed(1)}% of supply.`);
   } else {
     reasons.push('No confirmed owner address/holding — could mean renounced, could mean hidden.');
-    score += 8;
+    score += 5;
   }
 
   const holders = Array.isArray(sec.holders) ? sec.holders : [];
   const top10Percent = holders.reduce((sum, h) => sum + Number(h.percent || 0), 0) * 100;
-  if (top10Percent > top10HardCap) {
-    return reject('bsc', address, `Top 10 holders control ~${top10Percent.toFixed(1)}% of supply — over your ${top10HardCap}% limit.`);
-  }
-  if (top10Percent > maxTop10Percent) {
-    score += 25;
-    reasons.push(`Top 10 holders control ~${top10Percent.toFixed(1)}% of supply — above your LOW limit (${maxTop10Percent}%) but within your MEDIUM allowance (${cfg.mediumMaxTop10Percent}%).`);
-  } else {
-    if (top10Percent > 20) score += Math.min(25, top10Percent - 20);
-    if (holders.length) reasons.push(`Top 10 holders control ~${top10Percent.toFixed(1)}% of supply.`);
-  }
+  if (top10Percent > 20) score += Math.min(30, Math.floor((top10Percent - 20) * 0.6));
+  if (holders.length) reasons.push(`Top 10 holders control ~${top10Percent.toFixed(1)}% of supply.`);
 
   if (sec.is_mintable === '1') {
     score += 20;
@@ -371,26 +352,10 @@ function gateAssessment(assessment, cfg, { consumeSlot = true } = {}) {
     return assessment;
   }
 
-  if (assessment.verdict === 'MEDIUM' && cfg.minRecommendTier === 'LOW') {
-    assessment.reasons.push('MEDIUM risk tokens are currently turned off (min recommend tier = LOW).');
-    assessment.blockedBy = 'tier';
-    return assessment;
-  }
-  if (assessment.verdict === 'HIGH' && cfg.minRecommendTier === 'LOW') {
-    assessment.reasons.push('HIGH risk tokens are currently turned off (min recommend tier = LOW).');
-    assessment.blockedBy = 'tier';
-    return assessment;
-  }
-
-  // Entry-quality gate: your own ceiling on the risk score (lower = pickier).
-  // MEDIUM-tier tokens can additionally be held to a tighter ceiling than
-  // the overall one via mediumMaxScore.
-  const maxScore =
-    assessment.verdict === 'MEDIUM'
-      ? Math.min(cfg.maxRiskScore ?? 75, cfg.mediumMaxScore ?? 75)
-      : cfg.maxRiskScore ?? 75;
+  // Aggressive mode: do not block on tier. Only optional score ceiling (default 100 = allow all).
+  const maxScore = cfg.maxRiskScore ?? 100;
   if (assessment.score > maxScore) {
-    assessment.reasons.push(`Risk score ${assessment.score} is above your entry limit of ${maxScore}${assessment.verdict === 'MEDIUM' ? ' for MEDIUM-risk tokens' : ''}.`);
+    assessment.reasons.push(`Risk score ${assessment.score} is above your entry limit of ${maxScore}.`);
     assessment.blockedBy = 'score';
     return assessment;
   }

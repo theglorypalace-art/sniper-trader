@@ -50,19 +50,24 @@ function reject(chain, address, reason) {
 }
 
 function exitPlanFor(tier) {
+  // Aggressive targets for volatile meme market: aim 30-40%, exit fast, free the slot for the next one.
   switch (tier) {
     case 'LOW':
-      return { takeProfitPct: 20, stopLossPct: -25, maxHoldMs: 20 * 60 * 1000 };
+      return { takeProfitPct: 40, stopLossPct: -30, maxHoldMs: 8 * 60 * 1000 };
     case 'MEDIUM':
-      return { takeProfitPct: 15, stopLossPct: -30, maxHoldMs: 12 * 60 * 1000 };
+      return { takeProfitPct: 35, stopLossPct: -35, maxHoldMs: 6 * 60 * 1000 };
+    case 'HIGH':
+      return { takeProfitPct: 30, stopLossPct: -40, maxHoldMs: 5 * 60 * 1000 };
     default:
-      return { takeProfitPct: 12, stopLossPct: -35, maxHoldMs: 6 * 60 * 1000 };
+      return { takeProfitPct: 25, stopLossPct: -40, maxHoldMs: 4 * 60 * 1000 };
   }
 }
 
 function finalize(input) {
   const tier = tierFor(input.score);
-  const tradeable = tier === 'LOW' || tier === 'MEDIUM';
+  // Allow LOW / MEDIUM / HIGH so more coins can trade in a volatile market.
+  // CRITICAL (and hard rejects like freeze/honeypot) still blocked.
+  const tradeable = tier === 'LOW' || tier === 'MEDIUM' || tier === 'HIGH';
   return {
     ...input,
     verdict: tier,
@@ -371,13 +376,19 @@ function gateAssessment(assessment, cfg, { consumeSlot = true } = {}) {
     assessment.blockedBy = 'tier';
     return assessment;
   }
+  if (assessment.verdict === 'HIGH' && cfg.minRecommendTier === 'LOW') {
+    assessment.reasons.push('HIGH risk tokens are currently turned off (min recommend tier = LOW).');
+    assessment.blockedBy = 'tier';
+    return assessment;
+  }
 
   // Entry-quality gate: your own ceiling on the risk score (lower = pickier).
   // MEDIUM-tier tokens can additionally be held to a tighter ceiling than
-  // the overall one via mediumMaxScore (defaults to the same as maxRiskScore,
-  // i.e. no extra restriction, until you lower it).
+  // the overall one via mediumMaxScore.
   const maxScore =
-    assessment.verdict === 'MEDIUM' ? Math.min(cfg.maxRiskScore ?? 50, cfg.mediumMaxScore ?? 50) : cfg.maxRiskScore ?? 50;
+    assessment.verdict === 'MEDIUM'
+      ? Math.min(cfg.maxRiskScore ?? 75, cfg.mediumMaxScore ?? 75)
+      : cfg.maxRiskScore ?? 75;
   if (assessment.score > maxScore) {
     assessment.reasons.push(`Risk score ${assessment.score} is above your entry limit of ${maxScore}${assessment.verdict === 'MEDIUM' ? ' for MEDIUM-risk tokens' : ''}.`);
     assessment.blockedBy = 'score';

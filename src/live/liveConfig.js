@@ -8,28 +8,27 @@ let cached = {
   paused: false,
   enableSolana: staticConfig.ENABLE_SOLANA,
   enableBsc: staticConfig.ENABLE_BSC,
-  minRecommendTier: 'LOW_MEDIUM', // 'LOW' or 'LOW_MEDIUM' — default allows MEDIUM so the bot can actually enter once a safe candidate appears
-  maxTokensPerDay: staticConfig.MAX_TOKENS_PER_DAY,
-  maxDevPercent: 30,
-  maxTop10Percent: 70,
+  // Allow LOW + MEDIUM + HIGH so the bot trades more in a volatile market.
+  minRecommendTier: 'LOW_MEDIUM', // 'LOW' or 'LOW_MEDIUM' (HIGH is allowed when tradeable)
+  maxTokensPerDay: Math.max(staticConfig.MAX_TOKENS_PER_DAY, 15), // more slots per day
+  maxDevPercent: 45, // was 30 — accept higher creator holdings
+  maxTop10Percent: 85, // was 70
   capitalPct: staticConfig.CAPITAL_PCT,
   maxPositionSol: staticConfig.MAX_POSITION_SOL,
   bscCapitalPct: staticConfig.BSC_CAPITAL_PCT,
   bscMaxPositionBnb: staticConfig.BSC_MAX_POSITION_BNB,
-  takeProfitPct: 0, // 0 = auto by risk tier
-  stopLossPct: 0, // 0 = auto by risk tier (positive number: 25 means -25%)
-  maxHoldMin: 0, // 0 = auto by risk tier
-  maxRiskScore: 50, // only enter tokens scoring <= this
+  takeProfitPct: 0, // 0 = auto by risk tier (now 30-40%)
+  stopLossPct: 0, // 0 = auto by risk tier
+  maxHoldMin: 0, // 0 = auto by risk tier (now 5-8 min — exit fast)
+  maxRiskScore: 75, // was 50 — allow HIGH-tier scores through
   heartbeatMin: Number(process.env.HEARTBEAT_MIN || 60), // 0 = off
-  // Separate, looser ceilings that apply ONLY when a token would otherwise
-  // land as MEDIUM risk and minRecommendTier allows MEDIUM. A LOW-tier
-  // token is still governed by maxDevPercent/maxTop10Percent/maxRiskScore.
-  mediumMaxDevPercent: 45,
-  mediumMaxTop10Percent: 85,
-  mediumMaxScore: 50, // effectively "no extra restriction" until lowered below maxRiskScore
+  // Separate, looser ceilings for MEDIUM (and HIGH uses overall maxRiskScore).
+  mediumMaxDevPercent: 55,
+  mediumMaxTop10Percent: 90,
+  mediumMaxScore: 75,
   // BSC-only: reject any token whose buy or sell tax exceeds these.
-  maxBuyTaxPct: 15,
-  maxSellTaxPct: 15,
+  maxBuyTaxPct: 20,
+  maxSellTaxPct: 20,
 };
 
 // The settings added by supabase/migrations/002_*.sql and 003_*.sql. Until

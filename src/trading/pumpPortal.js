@@ -23,20 +23,57 @@ function buySlippagePct() {
 }
 
 /**
- * Read the wallet's raw token balance for `mint` (0 if no ATA / empty).
+ * Read the wallet's raw token balance for `mint` (0 if no ATA / empty / mint not indexed yet).
+ * Brand-new pump.fun mints often make `{ mint }` filter RPC calls fail with
+ * "could not find mint" — never throw; treat as 0 so the buy can still run.
  */
 async function getTokenBalanceRaw(mint) {
   const connection = getConnection();
   const wallet = loadWallet();
-  const mintPk = new PublicKey(mint);
-  const resp = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, { mint: mintPk });
-  let total = 0n;
-  for (const { account } of resp.value) {
-    const info = account.data.parsed && account.data.parsed.info;
-    if (!info || !info.tokenAmount) continue;
-    total += BigInt(info.tokenAmount.amount || '0');
+  let mintPk;
+  try {
+    mintPk = new PublicKey(mint);
+  } catch {
+    return 0n;
   }
-  return total;
+
+  // Path 1: filtered by mint (fast when mint is indexed)
+  try {
+    const resp = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, { mint: mintPk });
+    let total = 0n;
+    for (const { account } of resp.value) {
+      const info = account.data.parsed && account.data.parsed.info;
+      if (!info || !info.tokenAmount) continue;
+      total += BigInt(info.tokenAmount.amount || '0');
+    }
+    return total;
+  } catch (err) {
+    // "could not find mint" / Token program id errors on brand-new launches
+    console.warn(`[pumpPortal] mint-filtered balance lookup failed for ${mint}: ${err.message}`);
+  }
+
+  // Path 2: all token accounts for owner, match mint client-side (Token + Token-2022)
+  try {
+    const TOKEN_PROGRAM = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+    const TOKEN_2022 = new PublicKey('TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb');
+    let total = 0n;
+    for (const programId of [TOKEN_PROGRAM, TOKEN_2022]) {
+      try {
+        const resp = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, { programId });
+        for (const { account } of resp.value) {
+          const info = account.data.parsed && account.data.parsed.info;
+          if (!info || info.mint !== mint) continue;
+          total += BigInt((info.tokenAmount && info.tokenAmount.amount) || '0');
+        }
+      } catch (_) {
+        /* ignore per-program failures */
+      }
+    }
+    return total;
+  } catch (err) {
+    console.warn(`[pumpPortal] full balance scan failed for ${mint}: ${err.message}`);
+    return 0n;
+  }
 }
 
 async function portalTrade({ action, mint, amount, denominatedInSol, slippage }) {
@@ -109,7 +146,13 @@ async function buyOnPump(mint, solAmount) {
     };
   }
 
-  const balBefore = await getTokenBalanceRaw(mint);
+  let balBefore = 0n;
+  try {
+    balBefore = await getTokenBalanceRaw(mint);
+  } catch (_) {
+    balBefore = 0n;
+  }
+
   const { tx, wallet } = await portalTrade({
     action: 'buy',
     mint,

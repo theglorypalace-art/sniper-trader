@@ -4,33 +4,42 @@
 //
 // Docs: https://pumpportal.fun/local-trading-api/trading-api/
 // We request an unsigned tx, sign it ourselves, send via Helius RPC.
-const {
-  VersionedTransaction,
-  Connection,
-} = require('@solana/web3.js');
-const { DRY_RUN, HELIUS_RPC_URL, SLIPPAGE_BPS, PRIORITY_FEE_LAMPORTS } = require('../config');
+const { VersionedTransaction, PublicKey } = require('@solana/web3.js');
+const { DRY_RUN, SLIPPAGE_BPS, PRIORITY_FEE_LAMPORTS } = require('../config');
 const { getConnection, loadWallet } = require('../solana/wallet');
 
 const TRADE_LOCAL_URL = process.env.PUMPPORTAL_TRADE_URL || 'https://pumpportal.fun/api/trade-local';
 
+// Exit sells use higher slippage so TP/SL actually fill in thin curve liquidity.
+const EXIT_SLIPPAGE_PCT = Number(process.env.EXIT_SLIPPAGE_PCT || 25);
+
 function priorityFeeSol() {
-  // PRIORITY_FEE_LAMPORTS is in lamports; portal wants SOL as a float.
   const lamports = Number(PRIORITY_FEE_LAMPORTS || 100000);
   return Math.max(0.00001, lamports / 1e9);
 }
 
-function slippagePct() {
-  // SLIPPAGE_BPS e.g. 500 = 5%
+function buySlippagePct() {
   return Math.max(1, Math.round(Number(SLIPPAGE_BPS || 500) / 100));
 }
 
 /**
- * POST trade-local → unsigned VersionedTransaction bytes → sign → send.
- * action: 'buy' | 'sell'
- * amount: for buy = SOL amount (number); for sell = token amount or "100%"
- * denominatedInSol: true for buy-in-SOL, false for token amounts
+ * Read the wallet's raw token balance for `mint` (0 if no ATA / empty).
  */
-async function portalTrade({ action, mint, amount, denominatedInSol }) {
+async function getTokenBalanceRaw(mint) {
+  const connection = getConnection();
+  const wallet = loadWallet();
+  const mintPk = new PublicKey(mint);
+  const resp = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, { mint: mintPk });
+  let total = 0n;
+  for (const { account } of resp.value) {
+    const info = account.data.parsed && account.data.parsed.info;
+    if (!info || !info.tokenAmount) continue;
+    total += BigInt(info.tokenAmount.amount || '0');
+  }
+  return total;
+}
+
+async function portalTrade({ action, mint, amount, denominatedInSol, slippage }) {
   const wallet = loadWallet();
   const body = {
     publicKey: wallet.publicKey.toBase58(),
@@ -38,9 +47,9 @@ async function portalTrade({ action, mint, amount, denominatedInSol }) {
     mint,
     amount: typeof amount === 'number' ? amount : String(amount),
     denominatedInSol: denominatedInSol ? 'true' : 'false',
-    slippage: slippagePct(),
+    slippage: slippage != null ? slippage : buySlippagePct(),
     priorityFee: priorityFeeSol(),
-    pool: 'auto', // pump curve → pump-amm → raydium as needed
+    pool: 'auto',
   };
 
   const res = await fetch(TRADE_LOCAL_URL, {
@@ -54,12 +63,10 @@ async function portalTrade({ action, mint, amount, denominatedInSol }) {
     throw new Error(`PumpPortal trade-local failed (${res.status}): ${text.slice(0, 300)}`);
   }
 
-  // Response is raw serialized transaction bytes (arraybuffer) or sometimes JSON error
   const contentType = res.headers.get('content-type') || '';
   if (contentType.includes('application/json')) {
     const j = await res.json();
     if (j.error || j.errors) throw new Error(`PumpPortal: ${JSON.stringify(j.error || j.errors)}`);
-    // some versions return base64 in JSON
     if (j.transaction) {
       const tx = VersionedTransaction.deserialize(Buffer.from(j.transaction, 'base64'));
       return { tx, wallet };
@@ -86,11 +93,6 @@ async function sendSigned(tx, wallet) {
   return { dryRun: false, signature };
 }
 
-/**
- * Buy `solAmount` SOL worth of mint on pump.fun curve (or auto-routed pool).
- * Returns { dryRun, signature, sizeSol, tokenAmountRaw } — tokenAmountRaw may
- * be null if we cannot read the ATA yet; monitor will fall back to 100% sell.
- */
 async function buyOnPump(mint, solAmount) {
   const sizeSol = Number(solAmount);
   if (!(sizeSol > 0)) throw new Error('buyOnPump: solAmount must be > 0');
@@ -103,49 +105,79 @@ async function buyOnPump(mint, solAmount) {
       sizeSol,
       tokenAmountRaw: null,
       via: 'pumpPortal',
-      // fake quote so positionManager can compute a placeholder entry price
       quote: { outAmount: String(Math.floor(1e6 * sizeSol)) },
     };
   }
 
+  const balBefore = await getTokenBalanceRaw(mint);
   const { tx, wallet } = await portalTrade({
     action: 'buy',
     mint,
     amount: sizeSol,
     denominatedInSol: true,
+    slippage: buySlippagePct(),
   });
   const sent = await sendSigned(tx, wallet);
+
+  // Wait briefly then read real balance — portal does not return outAmount.
+  let tokenAmountRaw = 0n;
+  for (let i = 0; i < 5; i += 1) {
+    await new Promise((r) => setTimeout(r, 800));
+    const bal = await getTokenBalanceRaw(mint);
+    if (bal > balBefore) {
+      tokenAmountRaw = bal - balBefore;
+      break;
+    }
+    if (bal > 0n && balBefore === 0n) {
+      tokenAmountRaw = bal;
+      break;
+    }
+  }
+
+  if (tokenAmountRaw === 0n) {
+    // Last resort: total balance (may include prior dust)
+    tokenAmountRaw = await getTokenBalanceRaw(mint);
+  }
+
+  console.log(`[pumpPortal] bought ${mint}: +${tokenAmountRaw.toString()} raw tokens for ${sizeSol} SOL (sig ${sent.signature})`);
+
   return {
     ...sent,
     sizeSol,
-    tokenAmountRaw: null, // filled by caller if needed via balance check
+    tokenAmountRaw: tokenAmountRaw > 0n ? tokenAmountRaw.toString() : null,
     via: 'pumpPortal',
-    quote: { outAmount: '0' },
+    quote: { outAmount: tokenAmountRaw > 0n ? tokenAmountRaw.toString() : '0' },
   };
 }
 
 /**
- * Sell tokens back. Prefer amountRaw if known; otherwise sell 100% of wallet balance.
+ * Always sell 100% of wallet holdings for this mint when amount unknown/zero.
+ * Uses elevated exit slippage so TP/SL fills on thin curve books.
  */
 async function sellOnPump(mint, tokenAmountRaw) {
   if (DRY_RUN) {
-    console.log(`[pumpPortal] [DRY RUN] would sell ${tokenAmountRaw ?? '100%'} of ${mint}`);
-    return { dryRun: true, signature: null, via: 'pumpPortal' };
+    console.log(`[pumpPortal] [DRY RUN] would sell 100% of ${mint}`);
+    return { dryRun: true, signature: null, via: 'pumpPortal', quote: null };
   }
 
-  const amount =
-    tokenAmountRaw != null && Number(tokenAmountRaw) > 0
-      ? Number(tokenAmountRaw)
-      : '100%';
+  const bal = await getTokenBalanceRaw(mint);
+  if (bal === 0n) {
+    const err = new Error('SellZeroAmount: wallet holds 0 tokens for this mint — nothing to sell');
+    err.code = 'SELL_ZERO';
+    throw err;
+  }
 
+  // Prefer "100%" so we never pass a stale/wrong raw amount that underflows to 0.
   const { tx, wallet } = await portalTrade({
     action: 'sell',
     mint,
-    amount,
+    amount: '100%',
     denominatedInSol: false,
+    slippage: EXIT_SLIPPAGE_PCT,
   });
   const sent = await sendSigned(tx, wallet);
-  return { ...sent, via: 'pumpPortal' };
+  console.log(`[pumpPortal] sold 100% of ${mint} (had ${bal.toString()} raw) sig=${sent.signature}`);
+  return { ...sent, via: 'pumpPortal', quote: null, soldRaw: bal.toString() };
 }
 
-module.exports = { buyOnPump, sellOnPump, portalTrade };
+module.exports = { buyOnPump, sellOnPump, getTokenBalanceRaw, portalTrade };

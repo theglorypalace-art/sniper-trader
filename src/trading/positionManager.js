@@ -273,8 +273,11 @@ async function buyAndTrack(mint, assessment, liveCfg, { preferPump = false } = {
     return;
   }
 
-  const outAmount = Number(buyResult.quote && buyResult.quote.outAmount) || 0;
-  const entryPriceSolPerToken = outAmount > 0 ? lamports / outAmount : 0;
+  const rawOut = buyResult.tokenAmountRaw != null
+    ? buyResult.tokenAmountRaw
+    : (buyResult.quote && buyResult.quote.outAmount);
+  const outAmountNum = rawOut != null && rawOut !== '' ? Number(rawOut) : 0;
+  const entryPriceSolPerToken = outAmountNum > 0 ? lamports / outAmountNum : 0;
   const dbPositionId = await stateSync.recordPositionOpened({
     chain: 'solana',
     address: mint,
@@ -286,7 +289,7 @@ async function buyAndTrack(mint, assessment, liveCfg, { preferPump = false } = {
   const position = {
     mint,
     sizeSol,
-    tokenAmountRaw: outAmount > 0 ? outAmount : null,
+    tokenAmountRaw: outAmountNum > 0 ? (typeof rawOut === 'string' ? rawOut : String(Math.floor(outAmountNum))) : null,
     entryPriceSolPerToken,
     openedAt: Date.now(),
     dryRun: buyResult.dryRun,
@@ -391,17 +394,17 @@ async function exitPosition(mint, reason, pnlPct) {
   let lastErr = null;
   for (let attempt = 1; attempt <= SELL_ATTEMPTS; attempt += 1) {
     try {
-      // Prefer PumpPortal when we bought on-curve or Jupiter fails (no route).
+      // Pump positions (and any unknown balance): sell 100% via PumpPortal with high exit slippage.
+      // Jupiter path only when we have a known raw amount and bought via Jupiter.
       if (position.via === 'pumpPortal' || !position.tokenAmountRaw) {
         sellResult = await sellOnPump(mint, position.tokenAmountRaw);
-        // Normalize shape for downstream logging
         if (!sellResult.quote) sellResult.quote = null;
       } else {
         try {
           sellResult = await sellToSol(mint, position.tokenAmountRaw, wallet);
         } catch (jupErr) {
-          console.warn(`[position] Jupiter sell failed, trying PumpPortal: ${jupErr.message}`);
-          sellResult = await sellOnPump(mint, position.tokenAmountRaw);
+          console.warn(`[position] Jupiter sell failed, trying PumpPortal 100%: ${jupErr.message}`);
+          sellResult = await sellOnPump(mint, null);
           if (!sellResult.quote) sellResult.quote = null;
         }
       }
@@ -409,19 +412,41 @@ async function exitPosition(mint, reason, pnlPct) {
     } catch (err) {
       lastErr = err;
       console.error(`[position] sell attempt ${attempt}/${SELL_ATTEMPTS} failed for ${mint}:`, err.message);
+      // Zero balance: stop retrying immediately
+      if (err.code === 'SELL_ZERO' || /SellZeroAmount|holds 0 tokens|0x1786/i.test(err.message || '')) {
+        break;
+      }
       if (attempt < SELL_ATTEMPTS) await sleep(SELL_RETRY_BASE_MS * attempt);
     }
   }
 
   if (!sellResult) {
-    // Keep the position tracked so the monitor retries — do NOT abandon it.
+    const msg = (lastErr && lastErr.message) || '';
+    const isZero =
+      (lastErr && lastErr.code === 'SELL_ZERO') ||
+      /SellZeroAmount|sell zero|holds 0 tokens|0x1786/i.test(msg);
+
+    if (isZero) {
+      // Nothing in the wallet — buy never filled, or already sold. Drop the position.
+      openPositions.delete(mint);
+      logTrade({ mint, chain: 'solana', event: 'sell_abandoned', error: msg, reason });
+      runtime.recordSkip('solana', 'sell zero amount — abandoned');
+      telegram.notify(
+        `⚠️ SELL ABANDONED for ${mint} (${reason}): wallet holds 0 tokens.\n` +
+          `Position closed in bot state (nothing left to sell). Check if the buy actually filled.`
+      );
+      console.warn(`[position] abandoned ${mint} — SellZeroAmount / empty balance`);
+      return;
+    }
+
+    // Transient failure: keep tracking and retry later.
     position.exiting = false;
     position.sellFailures += 1;
     position.nextExitAt = Date.now() + Math.min(60000, 10000 * position.sellFailures);
-    logTrade({ mint, chain: 'solana', event: 'sell_failed', error: lastErr && lastErr.message, reason });
+    logTrade({ mint, chain: 'solana', event: 'sell_failed', error: msg, reason });
     if (position.sellFailures === 1 || position.sellFailures % 5 === 0) {
       telegram.notify(
-        `⚠️ SELL FAILED for ${mint} (${reason}) after ${SELL_ATTEMPTS} tries: ${lastErr && lastErr.message}\n` +
+        `⚠️ SELL FAILED for ${mint} (${reason}) after ${SELL_ATTEMPTS} tries: ${msg}\n` +
           `Still holding it — the bot will keep retrying. If it keeps failing, sell manually.`
       );
     }

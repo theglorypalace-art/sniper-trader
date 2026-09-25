@@ -39,7 +39,7 @@ module.exports = {
   MAX_POSITION_SOL: Number(process.env.MAX_POSITION_SOL || 0.5), // hard cap regardless of CAPITAL_PCT (0 = no cap)
   SOL_FEE_RESERVE: Number(process.env.SOL_FEE_RESERVE || 0.01), // SOL always left in the wallet for fees/rent, even at 100%
   MAX_CONCURRENT_POSITIONS: Number(process.env.MAX_CONCURRENT_POSITIONS || 1),
-  SLIPPAGE_BPS: Number(process.env.SLIPPAGE_BPS || 500), // 5% — thin new-launch liquidity needs room
+  SLIPPAGE_BPS: Number(process.env.SLIPPAGE_BPS || 1500), // 5% — thin new-launch liquidity needs room
   PRIORITY_FEE_LAMPORTS: Number(process.env.PRIORITY_FEE_LAMPORTS || 100000),
 
   // ---- BNB Smart Chain / PancakeSwap ----

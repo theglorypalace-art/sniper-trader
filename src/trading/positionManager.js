@@ -75,9 +75,18 @@ runtime.registerPositions('solana', () =>
 );
 
 async function tryEnterPosition(mint) {
-  if (openPositions.size + entering >= MAX_CONCURRENT_POSITIONS) {
-    runtime.recordSkip('solana', 'a position is already open (max concurrent reached)');
+  if (openPositions.size >= MAX_CONCURRENT_POSITIONS) {
+    runtime.recordSkip('solana', 'already holding a position (max concurrent reached)');
     console.log(`[position] skipping ${mint} — already at MAX_CONCURRENT_POSITIONS (${MAX_CONCURRENT_POSITIONS})`);
+    return;
+  }
+  if (entering + openPositions.size >= MAX_CONCURRENT_POSITIONS) {
+    // Not actually holding a position yet — another candidate that arrived
+    // moments earlier is still being assessed (GoPlus / bonding-curve / sell
+    // check take a second or two each), so this one is skipped rather than
+    // risking two buys racing past MAX_CONCURRENT_POSITIONS.
+    runtime.recordSkip('solana', 'busy evaluating another candidate that arrived first');
+    console.log(`[position] skipping ${mint} — already evaluating another candidate (MAX_CONCURRENT_POSITIONS=${MAX_CONCURRENT_POSITIONS})`);
     return;
   }
   if (openPositions.has(mint)) return;

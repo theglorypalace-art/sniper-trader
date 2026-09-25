@@ -72,9 +72,17 @@ runtime.registerPositions('bsc', () =>
 );
 
 async function tryEnterPosition(tokenAddress) {
-  if (openPositions.size + entering >= BSC_MAX_CONCURRENT_POSITIONS) {
-    runtime.recordSkip('bsc', 'a position is already open (max concurrent reached)');
+  if (openPositions.size >= BSC_MAX_CONCURRENT_POSITIONS) {
+    runtime.recordSkip('bsc', 'already holding a position (max concurrent reached)');
     console.log(`[position-bsc] skipping ${tokenAddress} — already at BSC_MAX_CONCURRENT_POSITIONS (${BSC_MAX_CONCURRENT_POSITIONS})`);
+    return;
+  }
+  if (entering + openPositions.size >= BSC_MAX_CONCURRENT_POSITIONS) {
+    // Not actually holding a position yet — another candidate that arrived
+    // moments earlier is still being assessed, so this one is skipped rather
+    // than risking two buys racing past BSC_MAX_CONCURRENT_POSITIONS.
+    runtime.recordSkip('bsc', 'busy evaluating another candidate that arrived first');
+    console.log(`[position-bsc] skipping ${tokenAddress} — already evaluating another candidate (BSC_MAX_CONCURRENT_POSITIONS=${BSC_MAX_CONCURRENT_POSITIONS})`);
     return;
   }
   if (openPositions.has(tokenAddress)) return;

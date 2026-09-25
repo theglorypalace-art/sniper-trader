@@ -167,6 +167,9 @@ entirely if you only want one.
    - **💰 Capital %** — % of balance per trade (any value, 0.01–100%) and the max-per-trade cap for each chain (or **No cap** to let the % alone decide).
    - **🎯 Take profit / 🛑 Stop loss / ⏱ Max hold** — override the automatic risk-tier exit plan with your own numbers, per chain trade. Changes apply to positions that are already open, immediately.
    - **🛡 Risk tier**, **🔍 Filters** (dev%, top10%, and a risk-score entry-quality ceiling), **📅 Daily limit**.
+   - **💼 Wallet** — live SOL/BNB balance, wallet address, what the *next* trade would actually spend given your current settings, and whether the bot is locked to your Telegram chat.
+
+   Security: the bot only responds to the chat whose ID matches `TELEGRAM_CHAT_ID` on Railway. Send `/start` (or open **💼 Wallet**) to see whether you're locked — if `TELEGRAM_CHAT_ID` isn't set, anyone who finds the bot can trade with your wallet, and it tells you so.
 
    Every setting also has a typed command — `/positions`, `/scanner`, `/setcapital 12.5`, `/setbsccapital`, `/setmaxpos`, `/setbscmaxpos`, `/settp` (take profit), `/setsl` (stop loss), `/setmaxhold`, `/setscore` (entry quality), `/setheartbeat` (periodic "still scanning" summary), `/setmax`, `/setrisk low|lowmedium`, `/setdev`, `/settop10`, `/solana on|off`, `/bsc on|off` — send one with no value to get its buttons. You get a push notification the instant a token is recommended, bought, or sold (with the real entry vs. exit price and P&L), the moment the bot boots, and — if you turn on the heartbeat — a periodic summary even when nothing happened, so silence never means "is it even running?"
 

@@ -167,4 +167,60 @@ function scannerHeadline() {
     .join(' | ');
 }
 
-module.exports = { scannerText, positionsText, heartbeatText, scannerHeadline, entryBlockers, feedLine };
+// ---- 💼 Wallet screen ----
+async function balanceText(cfg, chatId) {
+  const lines = ['💼 Wallet'];
+
+  if (staticConfig.ENABLE_SOLANA) {
+    try {
+      const { getSolBalance, loadWallet: loadSolWallet } = require('../solana/wallet');
+      const { computeTradeSize } = require('../trading/sizing');
+      const bal = await getSolBalance();
+      const addr = loadSolWallet().publicKey.toBase58();
+      const { size, limitedBy } = computeTradeSize({ balance: bal, pct: cfg.capitalPct, cap: cfg.maxPositionSol, reserve: staticConfig.SOL_FEE_RESERVE });
+      lines.push(
+        '',
+        `🟣 Solana: ${fmtNative(bal, 'SOL')}`,
+        `${addr}`,
+        `Next buy would use: ${fmtNative(size, 'SOL')} (${limitedBy})`
+      );
+    } catch (err) {
+      lines.push('', `🟣 Solana: ⚠️ could not read balance (${err.message})`);
+    }
+  }
+
+  if (staticConfig.ENABLE_BSC) {
+    try {
+      const { getBnbBalance, loadWallet: loadBscWallet } = require('../bsc/wallet');
+      const { computeTradeSize } = require('../trading/sizing');
+      const bal = await getBnbBalance();
+      const addr = loadBscWallet().address;
+      const { size, limitedBy } = computeTradeSize({ balance: bal, pct: cfg.bscCapitalPct, cap: cfg.bscMaxPositionBnb, reserve: staticConfig.BNB_FEE_RESERVE });
+      lines.push(
+        '',
+        `🟡 BSC: ${fmtNative(bal, 'BNB')}`,
+        `${addr}`,
+        `Next buy would use: ${fmtNative(size, 'BNB')} (${limitedBy})`
+      );
+    } catch (err) {
+      lines.push('', `🟡 BSC: ⚠️ could not read balance (${err.message})`);
+    }
+  }
+
+  if (!staticConfig.ENABLE_SOLANA && !staticConfig.ENABLE_BSC) lines.push('', 'No chain is enabled.');
+
+  const open = runtime.getOpenPositions();
+  if (open.length) {
+    lines.push('', `Locked in ${open.length} open position${open.length > 1 ? 's' : ''}:`);
+    for (const p of open) lines.push(`  ${short(p.address)} — ${fmtNative(p.valueNative ?? p.size, p.unit)}`);
+  }
+
+  lines.push('', staticConfig.TELEGRAM_CHAT_ID
+    ? `🔒 Locked to your Telegram chat (ID ${staticConfig.TELEGRAM_CHAT_ID}) — no one else can use these buttons or commands, even if they find this bot.`
+    : `⚠️ NOT locked — TELEGRAM_CHAT_ID isn't set, so ANYONE who messages this bot can trade with this wallet. Send /start to get your chat ID (${chatId || 'this chat'}), then set TELEGRAM_CHAT_ID to it on Railway and redeploy.`
+  );
+
+  return lines.join('\n');
+}
+
+module.exports = { scannerText, positionsText, heartbeatText, scannerHeadline, entryBlockers, feedLine, balanceText };

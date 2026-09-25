@@ -3,7 +3,7 @@ const { TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DRY_RUN, PRICE_POLL_INTERVAL_MS } 
 const { getSupabase } = require('../live/supabaseClient');
 const { getConfig, refresh, applyLocal, COLUMNS, MIGRATION_KEYS, isMigrated } = require('../live/liveConfig');
 const { getDailyCount } = require('../analysis/dailyLimiter');
-const { scannerText, positionsText, heartbeatText, scannerHeadline } = require('./reports');
+const { scannerText, positionsText, heartbeatText, scannerHeadline, balanceText } = require('./reports');
 const runtime = require('../live/runtime');
 
 let bot = null;
@@ -287,9 +287,10 @@ function mainView(cfg, banner) {
       btn(cfg.enableBsc ? '🟡 BSC: ON' : '🟡 BSC: OFF', 'toggle_bsc'),
     ],
     [btn('📈 Positions', 'pos'), btn('🔎 Scanner', 'scan')],
-    [btn('💰 Capital %', 'm:cap'), btn('🎯 Take profit', 'm:exit')],
-    [btn('🛡 Risk tier', 'm:risk'), btn('🔍 Filters', 'm:filters')],
-    [btn('📅 Daily limit', 'v:maxTokensPerDay'), btn('❓ Help', 'help')],
+    [btn('💼 Wallet', 'bal'), btn('💰 Capital %', 'm:cap')],
+    [btn('🎯 Take profit', 'm:exit'), btn('🛡 Risk tier', 'm:risk')],
+    [btn('🔍 Filters', 'm:filters'), btn('📅 Daily limit', 'v:maxTokensPerDay')],
+    [btn('❓ Help', 'help')],
   ]);
 }
 
@@ -369,6 +370,16 @@ function positionsView(cfg) {
   ]);
 }
 
+async function showBalance(b, chatId, messageId) {
+  const loading = view('💼 Loading wallet balances…', [[btn('⬅️ Back', 'menu')]]);
+  if (messageId) await b.editMessageText(loading.text, { chat_id: chatId, message_id: messageId, reply_markup: loading.reply_markup }).catch(() => {});
+  else messageId = (await b.sendMessage(chatId, loading.text, { reply_markup: loading.reply_markup })).message_id;
+
+  const text = await balanceText(getConfig(), chatId);
+  const final = view(text, [[btn('🔄 Refresh', 'bal'), btn('⬅️ Back', 'menu')]]);
+  await b.editMessageText(final.text, { chat_id: chatId, message_id: messageId, reply_markup: final.reply_markup }).catch(() => {});
+}
+
 function pickerView(key, cfg, banner) {
   const def = SETTINGS[key];
   const cur = cfg[key];
@@ -413,6 +424,7 @@ const HELP_TEXT =
   `Everything is button-driven — tap /menu (or ❓ Help → Menu) and use the buttons. Typing works too:\n\n` +
   `/menu or /status — control panel\n` +
   `/positions — open positions with live P&L and distance to take-profit\n` +
+  `/balance — wallet balance(s), address(es), what the next trade would use\n` +
   `/scanner — is it scanning? feed health, tokens checked, why it isn't buying\n` +
   `/starttrading or /resume — resume buying recommended tokens\n` +
   `/stoptrading or /pause — stop entering new positions (open ones are still monitored/sold)\n` +
@@ -457,6 +469,7 @@ function start() {
     { command: 'menu', description: 'Open the control panel' },
     { command: 'status', description: 'Show status + buttons' },
     { command: 'positions', description: 'Open positions + live P&L' },
+    { command: 'balance', description: 'Wallet balance + address' },
     { command: 'scanner', description: 'Is it scanning? Feed + funnel' },
     { command: 'settp', description: 'Take profit %' },
     { command: 'starttrading', description: 'Start trading' },
@@ -501,6 +514,15 @@ function start() {
   b.onText(/^\/positions\b/i, (msg) => {
     if (!isAuthorized(msg.chat.id)) return;
     send(msg.chat.id, positionsView(getConfig()));
+  });
+
+  b.onText(/^\/balance\b/i, async (msg) => {
+    if (!isAuthorized(msg.chat.id)) return;
+    try {
+      await showBalance(b, msg.chat.id);
+    } catch (err) {
+      fail(msg.chat.id, err);
+    }
   });
 
   b.onText(/^\/scanner\b/i, (msg) => {
@@ -644,6 +666,16 @@ function start() {
           toast = 'Updated';
           next = positionsView(getConfig());
           break;
+
+        case 'bal':
+          await b.answerCallbackQuery(query.id, { text: 'Loading…' });
+          try {
+            await showBalance(b, chatId, messageId);
+          } catch (err) {
+            console.error('[telegram] balance lookup failed:', err.message);
+            b.sendMessage(chatId, `Failed to load balance: ${err.message}`).catch(() => {});
+          }
+          return; // showBalance edits the message itself (loading state, then the real balances)
 
         case 'scan':
           toast = 'Updated';

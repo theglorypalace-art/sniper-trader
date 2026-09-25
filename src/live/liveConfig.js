@@ -8,7 +8,7 @@ let cached = {
   paused: false,
   enableSolana: staticConfig.ENABLE_SOLANA,
   enableBsc: staticConfig.ENABLE_BSC,
-  minRecommendTier: 'LOW', // 'LOW' or 'LOW_MEDIUM'
+  minRecommendTier: 'LOW_MEDIUM', // 'LOW' or 'LOW_MEDIUM' — default allows MEDIUM so the bot can actually enter once a safe candidate appears
   maxTokensPerDay: staticConfig.MAX_TOKENS_PER_DAY,
   maxDevPercent: 30,
   maxTop10Percent: 70,

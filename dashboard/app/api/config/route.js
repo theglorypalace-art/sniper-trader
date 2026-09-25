@@ -33,6 +33,11 @@ export async function PATCH(request) {
       bsc_capital_pct: [0.01, 100],
       max_position_sol: [0, 100000],
       bsc_max_position_bnb: [0, 100000],
+      take_profit_pct: [0, 10000],
+      stop_loss_pct: [0, 99],
+      max_hold_min: [0, 1440],
+      max_risk_score: [1, 100],
+      heartbeat_min: [0, 1440],
     };
     for (const [key, [lo, hi]] of Object.entries(RANGES)) {
       if (key in updates) {

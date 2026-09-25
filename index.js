@@ -2,6 +2,7 @@ const config = require('./src/config');
 const { getDailyCount } = require('./src/analysis/dailyLimiter');
 const liveConfig = require('./src/live/liveConfig');
 const telegram = require('./src/telegram/bot');
+const runtime = require('./src/live/runtime');
 
 const { PumpFunDetector } = require('./src/pumpfun/detector');
 const { tryEnterPosition: trySolanaPosition } = require('./src/trading/positionManager');
@@ -27,6 +28,7 @@ async function bootSolana() {
   }
 
   const detector = new PumpFunDetector(async ({ mint, signature }) => {
+    runtime.recordLaunch('solana');
     console.log(`[launch] new pump.fun token detected: ${mint} (tx ${signature})`);
     await trySolanaPosition(mint);
   });
@@ -45,6 +47,7 @@ async function bootBsc() {
   }
 
   const detector = new PancakeSwapDetector(async ({ tokenAddress, pairAddress }) => {
+    runtime.recordLaunch('bsc');
     console.log(`[launch] new PancakeSwap pair detected: token=${tokenAddress} pair=${pairAddress}`);
     await tryBscPosition(tokenAddress);
   });
@@ -73,6 +76,9 @@ async function main() {
 
   if (config.ENABLE_SOLANA) await bootSolana();
   if (config.ENABLE_BSC) await bootBsc();
+
+  // Tell Telegram we're up and scanning, and start the periodic heartbeat.
+  telegram.announceStartup();
 }
 
 main().catch((err) => {

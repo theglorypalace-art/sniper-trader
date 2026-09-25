@@ -291,13 +291,35 @@ async function assessBscToken(address) {
 // config so they're adjustable from Telegram/the dashboard without a
 // redeploy. Everything evaluated is still returned (with full reasoning)
 // for instant feedback — only assessment.recommended changes.
-async function assessAndGate({ chain, address }) {
+async function assessAndGate({ chain, address, consumeSlot = true }) {
   const cfg = getConfig();
   const assessment = chain === 'solana' ? await assessSolanaToken(address) : await assessBscToken(address);
-  if (!assessment.tradeable) return assessment;
+  if (!assessment.tradeable) {
+    assessment.blockedBy = 'unsafe';
+    return assessment;
+  }
 
   if (assessment.verdict === 'MEDIUM' && cfg.minRecommendTier === 'LOW') {
     assessment.reasons.push('MEDIUM risk tokens are currently turned off (min recommend tier = LOW).');
+    assessment.blockedBy = 'tier';
+    return assessment;
+  }
+
+  // Entry-quality gate: your own ceiling on the risk score (lower = pickier).
+  const maxScore = cfg.maxRiskScore ?? 50;
+  if (assessment.score > maxScore) {
+    assessment.reasons.push(`Risk score ${assessment.score} is above your entry limit of ${maxScore}.`);
+    assessment.blockedBy = 'score';
+    return assessment;
+  }
+
+  // While paused (or the chain is switched off) the token is still fully
+  // assessed and reported, but it must NOT use up one of today's slots —
+  // otherwise a paused bot would silently burn its daily quota on tokens it
+  // was never going to buy.
+  if (!consumeSlot) {
+    assessment.reasons.push('Passed every check, but trading is paused or this chain is off — not counted toward the daily limit.');
+    assessment.blockedBy = 'paused';
     return assessment;
   }
 
@@ -305,6 +327,7 @@ async function assessAndGate({ chain, address }) {
   assessment.recommended = gotSlot;
   if (!gotSlot) {
     assessment.reasons.push(`Passed the safety filter, but today's ${cfg.maxTokensPerDay}-token quota is already used.`);
+    assessment.blockedBy = 'quota';
   }
   return assessment;
 }

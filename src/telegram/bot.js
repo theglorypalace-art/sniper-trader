@@ -1,8 +1,10 @@
 const TelegramBot = require('node-telegram-bot-api');
-const { TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DRY_RUN } = require('../config');
+const { TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DRY_RUN, PRICE_POLL_INTERVAL_MS } = require('../config');
 const { getSupabase } = require('../live/supabaseClient');
-const { getConfig, refresh, applyLocal, COLUMNS } = require('../live/liveConfig');
+const { getConfig, refresh, applyLocal, COLUMNS, MIGRATION_KEYS, isMigrated } = require('../live/liveConfig');
 const { getDailyCount } = require('../analysis/dailyLimiter');
+const { scannerText, positionsText, heartbeatText, scannerHeadline } = require('./reports');
+const runtime = require('../live/runtime');
 
 let bot = null;
 
@@ -80,6 +82,81 @@ const SETTINGS = {
     parent: 'menu',
     describe: (c) => `Max tokens recommended (and traded) per UTC day. Used today: ${getDailyCount()}/${c.maxTokensPerDay}.`,
   },
+  takeProfitPct: {
+    cmd: 'settp',
+    title: '🎯 Take profit',
+    unit: '%',
+    min: 0,
+    max: 10000,
+    zeroLabel: 'Auto',
+    zeroIcon: '🤖',
+    zeroWord: 'auto',
+    presets: [0, 5, 10, 15, 20, 30, 50, 100],
+    steps: [1, 5],
+    parent: 'm:exit',
+    describe: (c) =>
+      c.takeProfitPct > 0
+        ? `The bot sells the WHOLE position as soon as profit reaches +${fmt(c.takeProfitPct)}%, on every trade. Applies to open positions immediately.\n\nTip: positions are also sold when the max hold time runs out (now ${c.maxHoldMin > 0 ? fmt(c.maxHoldMin) + ' min' : 'auto: 20/12/6 min by risk tier'}) — raise it under Max hold if your target needs longer.`
+        : `Auto: each token gets its own target from its risk tier (LOW +20% · MEDIUM +15% · HIGH +12%). Pick a % to use your own target on every trade instead.`,
+  },
+  stopLossPct: {
+    cmd: 'setsl',
+    title: '🛑 Stop loss',
+    unit: '%',
+    min: 0,
+    max: 99,
+    zeroLabel: 'Auto',
+    zeroIcon: '🤖',
+    zeroWord: 'auto',
+    presets: [0, 10, 15, 20, 25, 30, 40, 50],
+    steps: [1, 5],
+    parent: 'm:exit',
+    describe: (c) =>
+      c.stopLossPct > 0
+        ? `The bot sells the WHOLE position if it falls ${fmt(c.stopLossPct)}% below your entry. Applies to open positions immediately.`
+        : `Auto: LOW −25% · MEDIUM −30% · HIGH −35%. Pick a % to use your own stop on every trade instead.`,
+  },
+  maxHoldMin: {
+    cmd: 'setmaxhold',
+    title: '⏱ Max hold time',
+    unit: ' min',
+    min: 0,
+    max: 1440,
+    zeroLabel: 'Auto',
+    zeroIcon: '🤖',
+    zeroWord: 'auto',
+    presets: [0, 5, 10, 20, 30, 60, 120, 240],
+    steps: [1, 5],
+    parent: 'm:exit',
+    describe: () => `If neither take-profit nor stop-loss has fired by then, the bot sells anyway. Auto: LOW 20 · MEDIUM 12 · HIGH 6 minutes.`,
+  },
+  maxRiskScore: {
+    cmd: 'setscore',
+    title: '🎚 Entry quality (max risk score)',
+    unit: '',
+    min: 1,
+    max: 100,
+    int: true,
+    presets: [5, 10, 15, 20, 25, 30, 40, 50],
+    steps: [1, 5],
+    parent: 'm:filters',
+    describe: () => `Only enter tokens whose risk score is at or below this — lower is pickier. LOW tier is ≤ 25, MEDIUM ≤ 50. Every token's score shows in 🔎 Scanner. (Tokens are taken first-come, so this is how you steer toward better ones.)`,
+  },
+  heartbeatMin: {
+    cmd: 'setheartbeat',
+    title: '📡 Heartbeat',
+    unit: ' min',
+    min: 0,
+    max: 1440,
+    int: true,
+    zeroLabel: 'Off',
+    zeroIcon: '🔕',
+    zeroWord: 'off',
+    presets: [0, 15, 30, 60, 120, 240, 360, 720],
+    steps: [5, 15],
+    parent: 'scan',
+    describe: () => `Every N minutes the bot messages you a "still scanning" summary: is the feed alive, how many new tokens it checked, how many passed, and your open positions. Off = only alerts on real events.`,
+  },
   maxDevPercent: {
     cmd: 'setdev',
     title: '🔍 Max dev/creator holding',
@@ -120,7 +197,7 @@ function validate(def, raw) {
   if (raw === '' || raw == null || !Number.isFinite(n)) return { error: 'That is not a number.' };
   if (def.int && !Number.isInteger(n)) return { error: 'Please enter a whole number.' };
   if (n < def.min || n > def.max) {
-    return { error: def.zeroLabel ? `Enter an amount up to ${fmt(def.max)}${def.unit}, or 0 for no cap.` : `Must be between ${fmt(def.min)} and ${fmt(def.max)}${def.unit}.` };
+    return { error: def.zeroLabel ? `Enter a value up to ${fmt(def.max)}${def.unit}, or 0 for ${def.zeroLabel.toLowerCase()}.` : `Must be between ${fmt(def.min)} and ${fmt(def.max)}${def.unit}.` };
   }
   return { value: def.int ? n : round4(n) };
 }
@@ -129,7 +206,7 @@ function validate(def, raw) {
 // words like "none" / "no cap" / "off" / "unlimited" (= 0 = no cap).
 function parseInput(def, text) {
   const t = String(text).trim();
-  if (def.zeroLabel && /^(none|no\s*cap|nocap|off|unlimited|no\s*limit|remove)$/i.test(t)) return '0';
+  if (def.zeroLabel && /^(none|no\s*cap|nocap|off|auto|default|unlimited|no\s*limit|remove)$/i.test(t)) return '0';
   return t.replace(',', '.').replace(/\s*(%|sol|bnb)\s*$/i, '');
 }
 
@@ -145,14 +222,23 @@ async function updateConfig(patch) {
   const fields = {};
   for (const [k, v] of Object.entries(patch)) {
     if (!COLUMNS[k]) throw new Error(`Unknown setting: ${k}`);
+    // Settings from migration 002 live in memory only until that SQL has been run.
+    if (MIGRATION_KEYS.includes(k) && !isMigrated()) continue;
     fields[COLUMNS[k]] = v;
   }
-  const { error } = await supabase.from('bot_config').update({ ...fields, updated_by: 'telegram' }).eq('id', 1);
-  if (error) throw error;
-  // Force an immediate re-read instead of waiting on the realtime push or
-  // the 15s poll, then pin the values we just wrote so what's displayed can
-  // never be stale even if that re-read failed.
-  await refresh();
+  if (Object.keys(fields).length) {
+    const { error } = await supabase.from('bot_config').update({ ...fields, updated_by: 'telegram' }).eq('id', 1);
+    if (error) {
+      const missingColumn = /column|schema cache/i.test(error.message) && Object.keys(patch).some((k) => MIGRATION_KEYS.includes(k));
+      if (!missingColumn) throw error;
+      // Column not there yet — keep the change in memory rather than failing the tap.
+    } else {
+      // Force an immediate re-read instead of waiting on the realtime push or
+      // the 15s poll, so what we show next is the true, just-applied state.
+      await refresh();
+    }
+  }
+  // Pin the values we just set so what's displayed can never be stale.
   return applyLocal(patch);
 }
 
@@ -168,7 +254,7 @@ function isAuthorized(chatId) {
 // Views (text + inline keyboard). Every screen has a way back.
 // ---------------------------------------------------------------------
 const btn = (text, data) => ({ text, callback_data: data });
-const view = (text, inline_keyboard) => ({ text, reply_markup: { inline_keyboard } });
+const view = (text, inline_keyboard) => ({ text: text.length > 4000 ? text.slice(0, 3990) + '\n…' : text, reply_markup: { inline_keyboard } });
 
 function statusText(cfg) {
   const lines = [
@@ -179,9 +265,14 @@ function statusText(cfg) {
     `Capital per trade: ${fmt(cfg.capitalPct)}% SOL (${capLabel(cfg.maxPositionSol, 'SOL')}) | ${fmt(cfg.bscCapitalPct)}% BNB (${capLabel(cfg.bscMaxPositionBnb, 'BNB')})`,
     `Min tier to recommend: ${cfg.minRecommendTier === 'LOW' ? 'LOW only' : 'LOW + MEDIUM'}`,
     `Daily quota used: ${getDailyCount()}/${cfg.maxTokensPerDay}`,
-    `Risk limits: dev% ≤ ${fmt(cfg.maxDevPercent)} | top10% ≤ ${fmt(cfg.maxTop10Percent)}`,
+    `Exit: TP ${cfg.takeProfitPct > 0 ? '+' + fmt(cfg.takeProfitPct) + '%' : 'auto'} | SL ${cfg.stopLossPct > 0 ? '−' + fmt(cfg.stopLossPct) + '%' : 'auto'} | max hold ${cfg.maxHoldMin > 0 ? fmt(cfg.maxHoldMin) + 'm' : 'auto'}`,
+    `Risk limits: score ≤ ${fmt(cfg.maxRiskScore)} | dev% ≤ ${fmt(cfg.maxDevPercent)} | top10% ≤ ${fmt(cfg.maxTop10Percent)}`,
+    '',
+    scannerHeadline() || 'Scanner: no chain running',
+    `Open positions: ${runtime.getOpenPositions().length}`,
   ];
   if (!getSupabase()) lines.push('', '⚠️ Supabase not configured — changes apply now but reset on restart.');
+  else if (!isMigrated()) lines.push('', '⚠️ Take-profit / stop-loss / max-hold / entry-quality / heartbeat settings work now but reset on restart. Run supabase/migrations/002_exit_and_scanner_settings.sql in the Supabase SQL editor to save them.');
   return lines.join('\n');
 }
 
@@ -195,9 +286,10 @@ function mainView(cfg, banner) {
       btn(cfg.enableSolana ? '🟣 Solana: ON' : '🟣 Solana: OFF', 'toggle_solana'),
       btn(cfg.enableBsc ? '🟡 BSC: ON' : '🟡 BSC: OFF', 'toggle_bsc'),
     ],
-    [btn('💰 Capital %', 'm:cap'), btn('🎯 Daily limit', 'v:maxTokensPerDay')],
+    [btn('📈 Positions', 'pos'), btn('🔎 Scanner', 'scan')],
+    [btn('💰 Capital %', 'm:cap'), btn('🎯 Take profit', 'm:exit')],
     [btn('🛡 Risk tier', 'm:risk'), btn('🔍 Filters', 'm:filters')],
-    [btn('❓ Help', 'help')],
+    [btn('📅 Daily limit', 'v:maxTokensPerDay'), btn('❓ Help', 'help')],
   ]);
 }
 
@@ -233,13 +325,48 @@ function riskView(cfg, banner) {
 
 function filtersView(cfg) {
   return view(
-    `🔍 Risk filters\n\nDev/creator holding limit: ${fmt(cfg.maxDevPercent)}%\nTop-10 holders limit: ${fmt(cfg.maxTop10Percent)}%\n\n` +
-      `Tokens over either limit are rejected before any trade.`,
+    `🔍 Risk filters\n\nDev/creator holding limit: ${fmt(cfg.maxDevPercent)}%\nTop-10 holders limit: ${fmt(cfg.maxTop10Percent)}%\nEntry quality: risk score ≤ ${fmt(cfg.maxRiskScore)}\n\n` +
+      `Tokens over any limit are skipped before any trade. Tokens are taken first-come, so tighter limits = pickier entries.`,
     [
       [btn(`Dev ≤ ${fmt(cfg.maxDevPercent)}%`, 'v:maxDevPercent'), btn(`Top10 ≤ ${fmt(cfg.maxTop10Percent)}%`, 'v:maxTop10Percent')],
+      [btn(`🎚 Entry quality (score ≤ ${fmt(cfg.maxRiskScore)})`, 'v:maxRiskScore')],
       [btn('⬅️ Back', 'menu')],
     ]
   );
+}
+
+function exitView(cfg, banner) {
+  const tp = cfg.takeProfitPct > 0 ? `+${fmt(cfg.takeProfitPct)}% (yours)` : 'Auto by risk tier';
+  const sl = cfg.stopLossPct > 0 ? `−${fmt(cfg.stopLossPct)}% (yours)` : 'Auto by risk tier';
+  const hold = cfg.maxHoldMin > 0 ? `${fmt(cfg.maxHoldMin)} min (yours)` : 'Auto by risk tier';
+  return view(
+    (banner ? `${banner}\n\n` : '') +
+      `🎯 Exit rules — when the bot sells\n\n` +
+      `🎯 Take profit: ${tp}\n🛑 Stop loss: ${sl}\n⏱ Max hold: ${hold}\n\n` +
+      `Auto plan: LOW +20% / −25% / 20 min · MEDIUM +15% / −30% / 12 min · HIGH +12% / −35% / 6 min.\n\n` +
+      `The bot checks the sell price every ${Math.max(1, Math.round(PRICE_POLL_INTERVAL_MS / 1000))}s and sells the whole position the moment a rule triggers. ` +
+      `Changes apply to open positions immediately. You get a message on every entry and every exit with the real profit/loss.`,
+    [
+      [btn(`🎯 Take profit (${cfg.takeProfitPct > 0 ? '+' + fmt(cfg.takeProfitPct) + '%' : 'auto'})`, 'v:takeProfitPct'), btn(`🛑 Stop loss (${cfg.stopLossPct > 0 ? '−' + fmt(cfg.stopLossPct) + '%' : 'auto'})`, 'v:stopLossPct')],
+      [btn(`⏱ Max hold (${cfg.maxHoldMin > 0 ? fmt(cfg.maxHoldMin) + 'm' : 'auto'})`, 'v:maxHoldMin'), btn('📈 Positions', 'pos')],
+      [btn('⬅️ Back', 'menu')],
+    ]
+  );
+}
+
+function scannerView(cfg) {
+  return view(scannerText(cfg, 60), [
+    [btn('🔄 Refresh', 'scan'), btn(`📡 Heartbeat: ${cfg.heartbeatMin > 0 ? fmt(cfg.heartbeatMin) + 'm' : 'off'}`, 'v:heartbeatMin')],
+    [btn('📈 Positions', 'pos'), btn('🔍 Filters', 'm:filters')],
+    [btn('⬅️ Back', 'menu')],
+  ]);
+}
+
+function positionsView(cfg) {
+  return view(positionsText(cfg), [
+    [btn('🔄 Refresh', 'pos'), btn('🎯 Exit rules', 'm:exit')],
+    [btn('🔎 Scanner', 'scan'), btn('⬅️ Back', 'menu')],
+  ]);
 }
 
 function pickerView(key, cfg, banner) {
@@ -251,7 +378,7 @@ function pickerView(key, cfg, banner) {
   for (let i = 0; i < def.presets.length; i += 4) {
     rows.push(
       def.presets.slice(i, i + 4).map((p) =>
-        btn(`${Number(cur) === p ? '✅ ' : ''}${def.zeroLabel && p === 0 ? '♾ ' + def.zeroLabel : fmt(p) + shortUnit}`, `s:${key}:${p}`)
+        btn(`${Number(cur) === p ? '✅ ' : ''}${def.zeroLabel && p === 0 ? (def.zeroIcon || '♾') + ' ' + def.zeroLabel : fmt(p) + shortUnit}`, `s:${key}:${p}`)
       )
     );
   }
@@ -269,7 +396,7 @@ function pickerView(key, cfg, banner) {
   return view(
     (banner ? `${banner}\n\n` : '') +
       `${def.title}\n\nCurrent: ${valText(def, cur)}\n${warn}\n${def.describe(cfg)}\n\n` +
-      `${def.zeroLabel ? `Any amount, or 0 for ${def.zeroLabel.toLowerCase()}.` : `Range ${fmt(def.min)}–${fmt(def.max)}${def.unit}.`} Tap a preset, nudge with −/+, or type your own.`,
+      `${def.zeroLabel ? `Any value up to ${fmt(def.max)}${def.unit}, or 0 for ${def.zeroLabel.toLowerCase()}.` : `Range ${fmt(def.min)}–${fmt(def.max)}${def.unit}.`} Tap a preset, nudge with −/+, or type your own.`,
     rows
   );
 }
@@ -277,7 +404,7 @@ function pickerView(key, cfg, banner) {
 function customPromptView(key) {
   const def = SETTINGS[key];
   return view(
-    `✏️ ${def.title}\n\nType the new value and send it (${def.zeroLabel ? `any amount in${def.unit}, or "none" for no cap` : `${fmt(def.min)}–${fmt(def.max)}${def.unit}`}${def.int ? ', whole number' : ''}).\nExample: ${fmt(def.presets[def.zeroLabel ? 3 : 2])}`,
+    `✏️ ${def.title}\n\nType the new value and send it (${def.zeroLabel ? `any value up to ${fmt(def.max)}${def.unit}, or "${def.zeroWord || 'none'}" for ${def.zeroLabel.toLowerCase()}` : `${fmt(def.min)}–${fmt(def.max)}${def.unit}`}${def.int ? ', whole number' : ''}).\nExample: ${fmt(def.presets[def.zeroLabel ? 3 : 2])}`,
     [[btn('✖️ Cancel', `v:${key}`)]]
   );
 }
@@ -285,6 +412,8 @@ function customPromptView(key) {
 const HELP_TEXT =
   `Everything is button-driven — tap /menu (or ❓ Help → Menu) and use the buttons. Typing works too:\n\n` +
   `/menu or /status — control panel\n` +
+  `/positions — open positions with live P&L and distance to take-profit\n` +
+  `/scanner — is it scanning? feed health, tokens checked, why it isn't buying\n` +
   `/starttrading or /resume — resume buying recommended tokens\n` +
   `/stoptrading or /pause — stop entering new positions (open ones are still monitored/sold)\n` +
   `/solana on|off, /bsc on|off — toggle a chain's trading\n\n` +
@@ -293,7 +422,13 @@ const HELP_TEXT =
   `/setbsccapital <pct> — BSC % of BNB balance per buy\n` +
   `/setmaxpos <sol|none> — Solana max SOL per buy (none = no cap)\n` +
   `/setbscmaxpos <bnb|none> — BSC max BNB per buy (none = no cap)\n\n` +
+  `Exit rules (0 or "auto" = automatic by risk tier):\n` +
+  `/settp <pct> — take profit % (sell everything at this profit)\n` +
+  `/setsl <pct> — stop loss % (sell if down this much)\n` +
+  `/setmaxhold <min> — force-sell after this many minutes\n\n` +
   `Selectivity & safety:\n` +
+  `/setscore <n> — entry quality: only tokens with risk score ≤ n\n` +
+  `/setheartbeat <min|off> — "still scanning" summary every N minutes\n` +
   `/setmax <n> — max tokens per day\n` +
   `/setrisk low|lowmedium — only LOW risk, or LOW+MEDIUM\n` +
   `/setdev <pct> — max dev/creator holding\n` +
@@ -321,6 +456,9 @@ function start() {
   b.setMyCommands([
     { command: 'menu', description: 'Open the control panel' },
     { command: 'status', description: 'Show status + buttons' },
+    { command: 'positions', description: 'Open positions + live P&L' },
+    { command: 'scanner', description: 'Is it scanning? Feed + funnel' },
+    { command: 'settp', description: 'Take profit %' },
     { command: 'starttrading', description: 'Start trading' },
     { command: 'stoptrading', description: 'Stop trading' },
     { command: 'setcapital', description: 'Solana capital % per trade' },
@@ -358,6 +496,16 @@ function start() {
   b.onText(/^\/(menu|status)\b/i, (msg) => {
     if (!isAuthorized(msg.chat.id)) return;
     send(msg.chat.id, mainView(getConfig()));
+  });
+
+  b.onText(/^\/positions\b/i, (msg) => {
+    if (!isAuthorized(msg.chat.id)) return;
+    send(msg.chat.id, positionsView(getConfig()));
+  });
+
+  b.onText(/^\/scanner\b/i, (msg) => {
+    if (!isAuthorized(msg.chat.id)) return;
+    send(msg.chat.id, scannerView(getConfig()));
   });
 
   b.onText(/^\/cancel\b/i, (msg) => {
@@ -492,6 +640,16 @@ function start() {
           next = helpView();
           break;
 
+        case 'pos':
+          toast = 'Updated';
+          next = positionsView(getConfig());
+          break;
+
+        case 'scan':
+          toast = 'Updated';
+          next = scannerView(getConfig());
+          break;
+
         case 'pause':
           await updateConfig({ paused: true });
           toast = '⏹ Trading stopped';
@@ -521,7 +679,12 @@ function start() {
         }
 
         case 'm': // sub-menus
-          next = arg1 === 'cap' ? capitalView(getConfig()) : arg1 === 'risk' ? riskView(getConfig()) : arg1 === 'filters' ? filtersView(getConfig()) : mainView(getConfig());
+          next =
+            arg1 === 'cap' ? capitalView(getConfig())
+            : arg1 === 'risk' ? riskView(getConfig())
+            : arg1 === 'filters' ? filtersView(getConfig())
+            : arg1 === 'exit' ? exitView(getConfig())
+            : mainView(getConfig());
           break;
 
         case 'v': // open a value picker
@@ -583,6 +746,22 @@ function start() {
   });
 
   b.on('polling_error', (err) => console.error('[telegram] polling error:', err.message));
+
+  // Periodic "still scanning" summary (interval is adjustable; 0 = off).
+  let lastHeartbeatAt = Date.now();
+  const hb = setInterval(() => {
+    const cfg = getConfig();
+    const minutes = Number(cfg.heartbeatMin) || 0;
+    if (!minutes) {
+      lastHeartbeatAt = Date.now();
+      return;
+    }
+    if (Date.now() - lastHeartbeatAt >= minutes * 60 * 1000) {
+      lastHeartbeatAt = Date.now();
+      notify(heartbeatText(cfg, minutes));
+    }
+  }, 30 * 1000);
+  if (hb.unref) hb.unref();
 }
 
 // Called by the position managers for instant push notifications. Safe to
@@ -595,4 +774,24 @@ function notify(text) {
   });
 }
 
-module.exports = { start, notify };
+// One message a few seconds after boot so you know the bot is up, which mode
+// it's in, and that the feeds actually connected.
+function announceStartup(delayMs = 8000) {
+  const t = setTimeout(() => {
+    const cfg = getConfig();
+    notify(
+      [
+        '🚀 Scanner started',
+        DRY_RUN ? '🧪 DRY RUN — no real trades' : '🔴 LIVE — real trades',
+        scannerHeadline() || 'No chain running',
+        `Entry: tier ${cfg.minRecommendTier === 'LOW' ? 'LOW only' : 'LOW+MEDIUM'} · score ≤ ${fmt(cfg.maxRiskScore)} · ${getDailyCount()}/${cfg.maxTokensPerDay} used today`,
+        `Exit: TP ${cfg.takeProfitPct > 0 ? '+' + fmt(cfg.takeProfitPct) + '%' : 'auto'} · SL ${cfg.stopLossPct > 0 ? '−' + fmt(cfg.stopLossPct) + '%' : 'auto'}`,
+        cfg.paused ? '⏸ Trading is STOPPED — tap /menu → Start trading.' : '🟢 Trading is on.',
+        'Send /scanner any time to see what it is checking.',
+      ].join('\n')
+    );
+  }, delayMs);
+  if (t.unref) t.unref();
+}
+
+module.exports = { start, notify, announceStartup };

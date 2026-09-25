@@ -16,7 +16,17 @@ let cached = {
   maxPositionSol: staticConfig.MAX_POSITION_SOL,
   bscCapitalPct: staticConfig.BSC_CAPITAL_PCT,
   bscMaxPositionBnb: staticConfig.BSC_MAX_POSITION_BNB,
+  takeProfitPct: 0, // 0 = auto by risk tier
+  stopLossPct: 0, // 0 = auto by risk tier (positive number: 25 means -25%)
+  maxHoldMin: 0, // 0 = auto by risk tier
+  maxRiskScore: 50, // only enter tokens scoring <= this
+  heartbeatMin: Number(process.env.HEARTBEAT_MIN || 60), // 0 = off
 };
+
+// The settings added by supabase/migrations/002_*.sql. Until that migration
+// has been run, these live in memory only.
+const MIGRATION_KEYS = ['takeProfitPct', 'stopLossPct', 'maxHoldMin', 'maxRiskScore', 'heartbeatMin'];
+let migrated = true;
 
 // Maps the camelCase keys used in code to the bot_config column names.
 const COLUMNS = {
@@ -31,10 +41,21 @@ const COLUMNS = {
   maxPositionSol: 'max_position_sol',
   bscCapitalPct: 'bsc_capital_pct',
   bscMaxPositionBnb: 'bsc_max_position_bnb',
+  takeProfitPct: 'take_profit_pct',
+  stopLossPct: 'stop_loss_pct',
+  maxHoldMin: 'max_hold_min',
+  maxRiskScore: 'max_risk_score',
+  heartbeatMin: 'heartbeat_min',
 };
+
+// Value from a DB column, or the last known value if the column doesn't exist yet.
+function num(row, col, fallback) {
+  return row[col] === undefined || row[col] === null ? fallback : Number(row[col]);
+}
 
 function mapRow(row) {
   if (!row) return cached;
+  migrated = MIGRATION_KEYS.every((k) => row[COLUMNS[k]] !== undefined);
   return {
     paused: row.paused,
     enableSolana: row.enable_solana,
@@ -47,6 +68,11 @@ function mapRow(row) {
     maxPositionSol: Number(row.max_position_sol),
     bscCapitalPct: Number(row.bsc_capital_pct),
     bscMaxPositionBnb: Number(row.bsc_max_position_bnb),
+    takeProfitPct: num(row, 'take_profit_pct', cached.takeProfitPct),
+    stopLossPct: num(row, 'stop_loss_pct', cached.stopLossPct),
+    maxHoldMin: num(row, 'max_hold_min', cached.maxHoldMin),
+    maxRiskScore: num(row, 'max_risk_score', cached.maxRiskScore),
+    heartbeatMin: num(row, 'heartbeat_min', cached.heartbeatMin),
   };
 }
 
@@ -98,4 +124,7 @@ async function start() {
   setInterval(refresh, 15000);
 }
 
-module.exports = { start, getConfig, refresh, applyLocal, COLUMNS };
+// False when Supabase is configured but the 002 migration hasn't been run.
+const isMigrated = () => migrated;
+
+module.exports = { start, getConfig, refresh, applyLocal, COLUMNS, MIGRATION_KEYS, isMigrated };

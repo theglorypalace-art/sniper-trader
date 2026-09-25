@@ -21,6 +21,11 @@ create table if not exists bot_config (
   max_position_sol numeric not null default 0.5,
   bsc_capital_pct numeric not null default 5,
   bsc_max_position_bnb numeric not null default 0.1,
+  take_profit_pct numeric not null default 0,   -- 0 = auto by risk tier
+  stop_loss_pct numeric not null default 0,     -- 0 = auto by risk tier (positive: 25 = -25%)
+  max_hold_min numeric not null default 0,      -- 0 = auto by risk tier
+  max_risk_score numeric not null default 50,   -- entry quality gate (LOW <= 25, MEDIUM <= 50)
+  heartbeat_min integer not null default 60,    -- 0 = off
   updated_at timestamptz not null default now(),
   updated_by text -- 'telegram', 'dashboard', 'default'
 );
@@ -83,6 +88,7 @@ create table if not exists positions (
   exit_tx text,
   exit_reason text,                 -- 'take_profit' | 'stop_loss' | 'max_age'
   pnl_pct numeric,
+  pnl_native numeric,               -- realized P&L in SOL/BNB
   opened_at timestamptz not null default now(),
   closed_at timestamptz
 );

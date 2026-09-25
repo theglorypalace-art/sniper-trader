@@ -46,20 +46,23 @@ async function recordPositionOpened({ chain, address, dryRun, sizeNative, entryT
   }
 }
 
-async function recordPositionClosed(positionId, { exitTx, exitReason, pnlPct }) {
+async function recordPositionClosed(positionId, { exitTx, exitReason, pnlPct, pnlNative }) {
   const supabase = getSupabase();
   if (!supabase || !positionId) return;
+  const base = {
+    status: 'closed',
+    exit_tx: exitTx,
+    exit_reason: exitReason,
+    pnl_pct: pnlPct,
+    closed_at: new Date().toISOString(),
+  };
   try {
-    await supabase
-      .from('positions')
-      .update({
-        status: 'closed',
-        exit_tx: exitTx,
-        exit_reason: exitReason,
-        pnl_pct: pnlPct,
-        closed_at: new Date().toISOString(),
-      })
-      .eq('id', positionId);
+    let { error } = await supabase.from('positions').update({ ...base, pnl_native: pnlNative }).eq('id', positionId);
+    if (error && /pnl_native|column|schema cache/i.test(error.message)) {
+      // Migration 002 not run yet: still mark the position closed.
+      ({ error } = await supabase.from('positions').update(base).eq('id', positionId));
+    }
+    if (error) throw error;
   } catch (err) {
     console.error('[state-sync] failed to record position close:', err.message);
   }

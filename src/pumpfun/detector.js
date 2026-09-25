@@ -1,6 +1,13 @@
 const WebSocket = require('ws');
 const { HELIUS_WSS_URL, PUMPFUN_PROGRAM_ID } = require('../config');
 const { getConnection } = require('../solana/wallet');
+const runtime = require('../live/runtime');
+
+// pump.fun's program-log stream carries every trade, so it is never quiet for
+// long. If nothing at all arrives for this long, the socket has silently died
+// (they can stall without ever raising a 'close' event) — force a reconnect.
+const STALL_MS = Number(process.env.DETECTOR_STALL_MS || 60000);
+const CONNECT_TIMEOUT_MS = 30000;
 
 // Fetches the full transaction and finds the mint address that's new in
 // this transaction (present in postTokenBalances but not preTokenBalances).
@@ -30,13 +37,49 @@ class PumpFunDetector {
     this.onLaunch = onLaunch;
     this.ws = null;
     this.reconnectDelayMs = 1000;
+    this.lastMsgAt = Date.now();
+    this.connectStartedAt = Date.now();
+    this.watchdog = null;
+  }
+
+  startWatchdog() {
+    if (this.watchdog) return;
+    this.watchdog = setInterval(() => {
+      const ws = this.ws;
+      if (!ws) return;
+      const silentFor = Date.now() - this.lastMsgAt;
+      const stalledOpen = ws.readyState === WebSocket.OPEN && silentFor > STALL_MS;
+      const stuckConnecting = ws.readyState === WebSocket.CONNECTING && Date.now() - this.connectStartedAt > CONNECT_TIMEOUT_MS;
+      if (!stalledOpen && !stuckConnecting) return;
+
+      console.warn(`[pumpfun-detector] feed stalled (${Math.round(silentFor / 1000)}s of silence) — forcing reconnect`);
+      runtime.setDetector('solana', 'stalled');
+      try {
+        require('../telegram/bot').notify('⚠️ Solana feed went silent — reconnecting automatically.');
+      } catch (_) {
+        /* telegram is optional */
+      }
+      this.lastMsgAt = Date.now(); // don't re-trigger before the reconnect completes
+      try {
+        ws.terminate(); // fires 'close' -> the reconnect below
+      } catch (_) {
+        /* already gone */
+      }
+    }, Math.min(15000, Math.max(1000, STALL_MS / 4)));
+    if (this.watchdog.unref) this.watchdog.unref();
   }
 
   start() {
+    runtime.setDetector('solana', 'connecting');
+    this.connectStartedAt = Date.now();
+    this.lastMsgAt = Date.now();
     this.ws = new WebSocket(HELIUS_WSS_URL);
+    this.startWatchdog();
 
     this.ws.on('open', () => {
       console.log('[pumpfun-detector] connected, subscribing to program logs...');
+      runtime.setDetector('solana', 'connected');
+      this.lastMsgAt = Date.now();
       this.reconnectDelayMs = 1000;
       this.ws.send(
         JSON.stringify({
@@ -49,6 +92,8 @@ class PumpFunDetector {
     });
 
     this.ws.on('message', (raw) => {
+      this.lastMsgAt = Date.now();
+      runtime.touch('solana');
       let msg;
       try {
         msg = JSON.parse(raw.toString());
@@ -76,6 +121,7 @@ class PumpFunDetector {
 
     this.ws.on('close', () => {
       console.warn('[pumpfun-detector] disconnected, reconnecting...');
+      runtime.setDetector('solana', 'reconnecting');
       setTimeout(() => this.start(), this.reconnectDelayMs);
       this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, 30000);
     });

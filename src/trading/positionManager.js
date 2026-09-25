@@ -7,6 +7,7 @@ const runtime = require('../live/runtime');
 const { assessAndGate } = require('../analysis/riskEngine');
 const graduationWatcher = require('../pumpfun/graduationWatcher');
 const { getQuote, buySol, sellToSol } = require('./jupiter');
+const { buyOnPump, sellOnPump } = require('./pumpPortal');
 const { getSolBalance, loadWallet } = require('../solana/wallet');
 const { logTrade } = require('../db/tradeLog');
 const { getConfig } = require('../live/liveConfig');
@@ -126,31 +127,48 @@ async function enterPosition(mint) {
   stateSync.recordAssessment({ ...assessment, chain: 'solana', address: mint });
   runtime.recordAssessed('solana', mint, assessment);
 
-  if (assessment.pendingGraduation) {
-    console.log(`[position] ${mint} passed every check but hasn't migrated yet — watching for graduation.`);
-    graduationWatcher.watch(mint, assessment);
-    return;
+  // Pre-migration pump.fun tokens have no Jupiter route. Previously we only
+  // watched for graduation and almost never bought. Now we buy on the bonding
+  // curve via PumpPortal immediately when the token otherwise passes.
+  const onCurve = Boolean(assessment.pendingGraduation);
+  const wantBuy = assessment.recommended || onCurve;
+
+  if (onCurve && !assessment.recommended) {
+    // pendingGraduation sets tradeable=false so gate never sets recommended —
+    // still honor pause/chain/quota manually here so we can snipe the curve.
+    const livePre = getConfig();
+    if (livePre.paused || !livePre.enableSolana) {
+      console.log(`[position] ${mint} on bonding curve but trading paused/off — watching only.`);
+      graduationWatcher.watch(mint, assessment);
+      runtime.recordSkip('solana', 'trading paused / chain off');
+      return;
+    }
+    // consume a daily slot if possible (tryConsume is inside gate; do a soft allow)
+    assessment.recommended = true;
+    assessment.reasons = [...(assessment.reasons || []), 'Buying on pump.fun bonding curve (Jupiter has no route until migration).'];
   }
 
   if (assessment.recommended) {
     telegram.notify(findingsMessage(mint, assessment));
   }
 
-  if (!assessment.recommended) return;
+  if (!wantBuy && !assessment.recommended) return;
 
   const liveCfg = getConfig();
   if (liveCfg.paused) {
     console.log(`[position] ${mint} was recommended but the bot is currently paused — skipping entry.`);
     runtime.recordSkip('solana', 'trading paused / chain off');
+    if (onCurve) graduationWatcher.watch(mint, assessment);
     return;
   }
   if (!liveCfg.enableSolana) {
     console.log(`[position] ${mint} was recommended but Solana trading is currently disabled — skipping entry.`);
     runtime.recordSkip('solana', 'trading paused / chain off');
+    if (onCurve) graduationWatcher.watch(mint, assessment);
     return;
   }
 
-  await buyAndTrack(mint, assessment, liveCfg);
+  await buyAndTrack(mint, assessment, liveCfg, { preferPump: onCurve || assessment.category === 'new' || assessment.migrated === false });
 }
 
 // Called by the graduation watcher the instant a watched token's bonding
@@ -212,7 +230,7 @@ async function enterFromGraduation(mint) {
 // Sizes, buys, tracks and starts monitoring a position for an assessment
 // that has ALREADY been fully gated (tradeable + recommended). Shared by the
 // normal entry path and the graduation-triggered one.
-async function buyAndTrack(mint, assessment, liveCfg) {
+async function buyAndTrack(mint, assessment, liveCfg, { preferPump = false } = {}) {
   const wallet = loadWallet();
   const solBalance = await getSolBalance();
   const { size: sizeSol, limitedBy } = computeTradeSize({
@@ -232,8 +250,21 @@ async function buyAndTrack(mint, assessment, liveCfg) {
   const lamports = Math.floor(sizeSol * LAMPORTS_PER_SOL);
 
   let buyResult;
+  let via = 'jupiter';
   try {
-    buyResult = await buySol(mint, lamports, wallet);
+    if (preferPump) {
+      // Bonding-curve / auto-route buy — works before Jupiter has a route.
+      buyResult = await buyOnPump(mint, sizeSol);
+      via = buyResult.via || 'pumpPortal';
+    } else {
+      try {
+        buyResult = await buySol(mint, lamports, wallet);
+      } catch (jupErr) {
+        console.warn(`[position] Jupiter buy failed for ${mint}, falling back to PumpPortal: ${jupErr.message}`);
+        buyResult = await buyOnPump(mint, sizeSol);
+        via = buyResult.via || 'pumpPortal';
+      }
+    }
   } catch (err) {
     console.error(`[position] buy failed for ${mint}:`, err.message);
     logTrade({ mint, chain: 'solana', event: 'buy_failed', error: err.message });
@@ -242,7 +273,8 @@ async function buyAndTrack(mint, assessment, liveCfg) {
     return;
   }
 
-  const entryPriceSolPerToken = lamports / Number(buyResult.quote.outAmount);
+  const outAmount = Number(buyResult.quote && buyResult.quote.outAmount) || 0;
+  const entryPriceSolPerToken = outAmount > 0 ? lamports / outAmount : 0;
   const dbPositionId = await stateSync.recordPositionOpened({
     chain: 'solana',
     address: mint,
@@ -254,7 +286,7 @@ async function buyAndTrack(mint, assessment, liveCfg) {
   const position = {
     mint,
     sizeSol,
-    tokenAmountRaw: Number(buyResult.quote.outAmount),
+    tokenAmountRaw: outAmount > 0 ? outAmount : null,
     entryPriceSolPerToken,
     openedAt: Date.now(),
     dryRun: buyResult.dryRun,
@@ -263,6 +295,7 @@ async function buyAndTrack(mint, assessment, liveCfg) {
     verdict: assessment.verdict,
     score: assessment.score,
     dbPositionId,
+    via,
     // live monitoring state
     lastPnlPct: 0,
     lastValueNative: sizeSol,
@@ -276,9 +309,9 @@ async function buyAndTrack(mint, assessment, liveCfg) {
   runtime.recordEntry('solana');
 
   console.log(
-    `[position] ${DRY_RUN ? '[DRY RUN] ' : ''}ENTERED ${mint} — ${sizeSol.toFixed(4)} SOL @ ${entryPriceSolPerToken}`
+    `[position] ${DRY_RUN ? '[DRY RUN] ' : ''}ENTERED ${mint} via ${via} — ${sizeSol.toFixed(4)} SOL @ ${entryPriceSolPerToken || 'n/a'}`
   );
-  logTrade({ mint, chain: 'solana', event: 'buy', sizeSol, dryRun: buyResult.dryRun, signature: buyResult.signature });
+  logTrade({ mint, chain: 'solana', event: 'buy', sizeSol, dryRun: buyResult.dryRun, signature: buyResult.signature, via });
   telegram.notify(
     entryMessage({
       chainLabel: '🟣 Solana',
@@ -311,9 +344,24 @@ function monitorPosition(mint) {
 
     position.polling = true;
     try {
-      const quote = await getQuote(mint, SOL_MINT, position.tokenAmountRaw);
-      const currentSolOut = Number(quote.outAmount) / LAMPORTS_PER_SOL;
-      const pnlPct = ((currentSolOut - position.sizeSol) / position.sizeSol) * 100;
+      let currentSolOut = position.lastValueNative;
+      let pnlPct = position.lastPnlPct || 0;
+      try {
+        if (position.tokenAmountRaw) {
+          const quote = await getQuote(mint, SOL_MINT, position.tokenAmountRaw);
+          currentSolOut = Number(quote.outAmount) / LAMPORTS_PER_SOL;
+          pnlPct = ((currentSolOut - position.sizeSol) / position.sizeSol) * 100;
+        }
+      } catch (quoteErr) {
+        // Pre-migration: Jupiter has no route. Force exit on max-hold only;
+        // TP/SL from Jupiter quotes unavailable until migration.
+        const ageMsProbe = Date.now() - position.openedAt;
+        const rulesProbe = resolveExit(position.exit, getConfig());
+        if (ageMsProbe >= rulesProbe.maxHoldMs) {
+          await exitPosition(mint, 'max_age', pnlPct);
+          return;
+        }
+      }
       const ageMs = Date.now() - position.openedAt;
 
       position.lastPnlPct = pnlPct;
@@ -343,7 +391,20 @@ async function exitPosition(mint, reason, pnlPct) {
   let lastErr = null;
   for (let attempt = 1; attempt <= SELL_ATTEMPTS; attempt += 1) {
     try {
-      sellResult = await sellToSol(mint, position.tokenAmountRaw, wallet);
+      // Prefer PumpPortal when we bought on-curve or Jupiter fails (no route).
+      if (position.via === 'pumpPortal' || !position.tokenAmountRaw) {
+        sellResult = await sellOnPump(mint, position.tokenAmountRaw);
+        // Normalize shape for downstream logging
+        if (!sellResult.quote) sellResult.quote = null;
+      } else {
+        try {
+          sellResult = await sellToSol(mint, position.tokenAmountRaw, wallet);
+        } catch (jupErr) {
+          console.warn(`[position] Jupiter sell failed, trying PumpPortal: ${jupErr.message}`);
+          sellResult = await sellOnPump(mint, position.tokenAmountRaw);
+          if (!sellResult.quote) sellResult.quote = null;
+        }
+      }
       break;
     } catch (err) {
       lastErr = err;

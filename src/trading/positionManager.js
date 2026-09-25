@@ -15,6 +15,8 @@ const stateSync = require('../live/stateSync');
 const telegram = require('../telegram/bot');
 
 const openPositions = new Map(); // mint -> position state
+let lastEntryAttemptAt = 0;
+const ENTRY_COOLDOWN_MS = Number(process.env.ENTRY_COOLDOWN_MS || 15000); // min gap between buy attempts
 
 function printFindings(mint, assessment) {
   console.log(`\n[findings] ${mint} (solana)`);
@@ -83,17 +85,22 @@ async function tryEnterPosition(mint) {
     return;
   }
   if (entering + openPositions.size >= MAX_CONCURRENT_POSITIONS) {
-    // Not actually holding a position yet — another candidate that arrived
-    // moments earlier is still being assessed (GoPlus / bonding-curve / sell
-    // check take a second or two each), so this one is skipped rather than
-    // risking two buys racing past MAX_CONCURRENT_POSITIONS.
     runtime.recordSkip('solana', 'busy evaluating another candidate that arrived first');
     console.log(`[position] skipping ${mint} — already evaluating another candidate (MAX_CONCURRENT_POSITIONS=${MAX_CONCURRENT_POSITIONS})`);
     return;
   }
   if (openPositions.has(mint)) return;
 
+  // Cool down between buy attempts to stop spam of failed portal trades
+  const since = Date.now() - lastEntryAttemptAt;
+  if (lastEntryAttemptAt && since < ENTRY_COOLDOWN_MS) {
+    runtime.recordSkip('solana', 'entry cooldown');
+    console.log(`[position] skipping ${mint} — entry cooldown (${Math.ceil((ENTRY_COOLDOWN_MS - since) / 1000)}s left)`);
+    return;
+  }
+
   entering += 1;
+  lastEntryAttemptAt = Date.now();
   try {
     await enterPosition(mint);
   } finally {
@@ -127,48 +134,49 @@ async function enterPosition(mint) {
   stateSync.recordAssessment({ ...assessment, chain: 'solana', address: mint });
   runtime.recordAssessed('solana', mint, assessment);
 
-  // Pre-migration pump.fun tokens have no Jupiter route. Previously we only
-  // watched for graduation and almost never bought. Now we buy on the bonding
-  // curve via PumpPortal immediately when the token otherwise passes.
+  // Pre-migration: no Jupiter route. Buy on bonding curve only if it would
+  // have been recommended (or we explicitly promote it with a daily slot).
   const onCurve = Boolean(assessment.pendingGraduation);
-  const wantBuy = assessment.recommended || onCurve;
+  const liveCfg = getConfig();
 
   if (onCurve && !assessment.recommended) {
-    // pendingGraduation sets tradeable=false so gate never sets recommended —
-    // still honor pause/chain/quota manually here so we can snipe the curve.
-    const livePre = getConfig();
-    if (livePre.paused || !livePre.enableSolana) {
-      console.log(`[position] ${mint} on bonding curve but trading paused/off — watching only.`);
+    if (liveCfg.paused || !liveCfg.enableSolana) {
+      console.log(`[position] ${mint} on curve — paused/off, watch only`);
       graduationWatcher.watch(mint, assessment);
-      runtime.recordSkip('solana', 'trading paused / chain off');
       return;
     }
-    // consume a daily slot if possible (tryConsume is inside gate; do a soft allow)
+    // Promote to buy only if a daily slot is available (same selectivity as post-migration)
+    const { tryConsumeDailySlot } = require('../analysis/dailyLimiter');
+    const gotSlot = tryConsumeDailySlot(liveCfg.maxTokensPerDay);
+    if (!gotSlot) {
+      console.log(`[position] ${mint} on curve but daily quota full — not buying`);
+      runtime.recordSkip('solana', 'daily quota full');
+      return;
+    }
     assessment.recommended = true;
-    assessment.reasons = [...(assessment.reasons || []), 'Buying on pump.fun bonding curve (Jupiter has no route until migration).'];
+    assessment.reasons = [
+      ...(assessment.reasons || []),
+      'Buying on pump.fun bonding curve (no Jupiter route until migration).',
+    ];
   }
 
-  if (assessment.recommended) {
-    telegram.notify(findingsMessage(mint, assessment));
-  }
+  if (!assessment.recommended) return;
 
-  if (!wantBuy && !assessment.recommended) return;
-
-  const liveCfg = getConfig();
   if (liveCfg.paused) {
-    console.log(`[position] ${mint} was recommended but the bot is currently paused — skipping entry.`);
+    console.log(`[position] ${mint} recommended but paused — skip`);
     runtime.recordSkip('solana', 'trading paused / chain off');
-    if (onCurve) graduationWatcher.watch(mint, assessment);
     return;
   }
   if (!liveCfg.enableSolana) {
-    console.log(`[position] ${mint} was recommended but Solana trading is currently disabled — skipping entry.`);
+    console.log(`[position] ${mint} recommended but Solana off — skip`);
     runtime.recordSkip('solana', 'trading paused / chain off');
-    if (onCurve) graduationWatcher.watch(mint, assessment);
     return;
   }
 
-  await buyAndTrack(mint, assessment, liveCfg, { preferPump: onCurve || assessment.category === 'new' || assessment.migrated === false });
+  // Notify only when we actually attempt a buy (not every assessment)
+  await buyAndTrack(mint, assessment, liveCfg, {
+    preferPump: onCurve || assessment.category === 'new' || assessment.migrated === false,
+  });
 }
 
 // Called by the graduation watcher the instant a watched token's bonding
@@ -267,9 +275,14 @@ async function buyAndTrack(mint, assessment, liveCfg, { preferPump = false } = {
     }
   } catch (err) {
     console.error(`[position] buy failed for ${mint}:`, err.message);
-    logTrade({ mint, chain: 'solana', event: 'buy_failed', error: err.message });
-    runtime.recordSkip('solana', 'buy transaction failed');
-    telegram.notify(`⚠️ BUY FAILED for ${mint}: ${err.message}`);
+    logTrade({ mint, chain: 'solana', event: 'buy_failed', error: err.message, code: err.code || null });
+    runtime.recordSkip('solana', err.code === 'BUY_ZERO' ? 'buy filled 0 tokens' : 'buy transaction failed');
+    // Rate-limit: only notify hard failures occasionally, not every miss
+    if (err.code !== 'BUY_ZERO') {
+      telegram.notify(`⚠️ BUY FAILED for ${mint}: ${err.message}`.slice(0, 350));
+    } else {
+      console.warn(`[position] buy got 0 tokens for ${mint} — not tracking (no spam notify)`);
+    }
     return;
   }
 
@@ -277,6 +290,15 @@ async function buyAndTrack(mint, assessment, liveCfg, { preferPump = false } = {
     ? buyResult.tokenAmountRaw
     : (buyResult.quote && buyResult.quote.outAmount);
   const outAmountNum = rawOut != null && rawOut !== '' ? Number(rawOut) : 0;
+
+  // Never open a tracked position with 0 tokens — that caused SellZeroAmount spam.
+  if (!buyResult.dryRun && !(outAmountNum > 0)) {
+    console.warn(`[position] buy returned no tokens for ${mint} — not opening position`);
+    logTrade({ mint, chain: 'solana', event: 'buy_failed', error: 'zero tokens after buy' });
+    runtime.recordSkip('solana', 'buy filled 0 tokens');
+    return;
+  }
+
   const entryPriceSolPerToken = outAmountNum > 0 ? lamports / outAmountNum : 0;
   const dbPositionId = await stateSync.recordPositionOpened({
     chain: 'solana',
@@ -427,15 +449,11 @@ async function exitPosition(mint, reason, pnlPct) {
       /SellZeroAmount|sell zero|holds 0 tokens|0x1786/i.test(msg);
 
     if (isZero) {
-      // Nothing in the wallet — buy never filled, or already sold. Drop the position.
       openPositions.delete(mint);
       logTrade({ mint, chain: 'solana', event: 'sell_abandoned', error: msg, reason });
       runtime.recordSkip('solana', 'sell zero amount — abandoned');
-      telegram.notify(
-        `⚠️ SELL ABANDONED for ${mint} (${reason}): wallet holds 0 tokens.\n` +
-          `Position closed in bot state (nothing left to sell). Check if the buy actually filled.`
-      );
-      console.warn(`[position] abandoned ${mint} — SellZeroAmount / empty balance`);
+      // Console only — was spamming Telegram on empty positions
+      console.warn(`[position] abandoned ${mint} (${reason}) — 0 balance, no Telegram spam`);
       return;
     }
 

@@ -135,8 +135,22 @@ async function buyOnPump(mint, solAmount) {
   }
 
   if (tokenAmountRaw === 0n) {
-    // Last resort: total balance (may include prior dust)
     tokenAmountRaw = await getTokenBalanceRaw(mint);
+  }
+
+  // Extra wait — RPC can lag behind confirmed tx
+  if (tokenAmountRaw === 0n) {
+    await new Promise((r) => setTimeout(r, 2000));
+    tokenAmountRaw = await getTokenBalanceRaw(mint);
+  }
+
+  if (tokenAmountRaw === 0n) {
+    const err = new Error(
+      `Buy confirmed (sig ${sent.signature}) but wallet still holds 0 tokens of ${mint} — not opening a position`
+    );
+    err.code = 'BUY_ZERO';
+    err.signature = sent.signature;
+    throw err;
   }
 
   console.log(`[pumpPortal] bought ${mint}: +${tokenAmountRaw.toString()} raw tokens for ${sizeSol} SOL (sig ${sent.signature})`);
@@ -144,9 +158,9 @@ async function buyOnPump(mint, solAmount) {
   return {
     ...sent,
     sizeSol,
-    tokenAmountRaw: tokenAmountRaw > 0n ? tokenAmountRaw.toString() : null,
+    tokenAmountRaw: tokenAmountRaw.toString(),
     via: 'pumpPortal',
-    quote: { outAmount: tokenAmountRaw > 0n ? tokenAmountRaw.toString() : '0' },
+    quote: { outAmount: tokenAmountRaw.toString() },
   };
 }
 

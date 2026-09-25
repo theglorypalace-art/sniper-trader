@@ -4,6 +4,7 @@
 const staticConfig = require('../config');
 const runtime = require('../live/runtime');
 const { getDailyCount } = require('../analysis/dailyLimiter');
+const { goplusLimiter } = require('../analysis/rateLimiter');
 const { resolveExit } = require('../trading/exitRules');
 const { short, pct, fmtDuration, fmtNative, sign } = require('../trading/present');
 
@@ -93,7 +94,19 @@ function scannerText(cfg, minutes = 60) {
   }
 
   lines.push('', `Entry filter: tier ${cfg.minRecommendTier === 'LOW' ? 'LOW only' : 'LOW+MEDIUM'} • risk score ≤ ${cfg.maxRiskScore} • dev ≤ ${cfg.maxDevPercent}% • top10 ≤ ${cfg.maxTop10Percent}%`);
+  if (cfg.minRecommendTier === 'LOW_MEDIUM') {
+    lines.push(`MEDIUM allowance: dev ≤ ${cfg.mediumMaxDevPercent}% • top10 ≤ ${cfg.mediumMaxTop10Percent}% • score ≤ ${cfg.mediumMaxScore}`);
+  }
   lines.push(`Daily limit: ${getDailyCount()}/${cfg.maxTokensPerDay} used`);
+  if (goplusLimiter.pending || goplusLimiter.shedCount || goplusLimiter.droppedCount) {
+    lines.push(`GoPlus load: ${goplusLimiter.pending} queued, ${goplusLimiter.shedCount} skipped + ${goplusLimiter.droppedCount} dropped under load since boot (this is normal — the bot trades what it can check promptly rather than falling behind)`);
+  }
+  const solWatch = runtime.snapshot().chains.solana;
+  if (staticConfig.ENABLE_SOLANA && solWatch.watchTotals.added) {
+    lines.push(
+      `🎓 Graduation watch: ${solWatch.watchlistSize} watching now • ${solWatch.watchTotals.graduated} graduated • ${solWatch.watchTotals.boughtAtGraduation} bought at graduation • ${solWatch.watchTotals.expired} expired unwatched`
+    );
+  }
 
   if (snap.recent.length) {
     lines.push('', 'Last checked:');

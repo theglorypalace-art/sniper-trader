@@ -5,7 +5,8 @@ const telegram = require('./src/telegram/bot');
 const runtime = require('./src/live/runtime');
 
 const { PumpFunDetector } = require('./src/pumpfun/detector');
-const { tryEnterPosition: trySolanaPosition } = require('./src/trading/positionManager');
+const { tryEnterPosition: trySolanaPosition, enterFromGraduation } = require('./src/trading/positionManager');
+const graduationWatcher = require('./src/pumpfun/graduationWatcher');
 const { getSolBalance, loadWallet: loadSolanaWallet } = require('./src/solana/wallet');
 
 const { PancakeSwapDetector } = require('./src/bsc/detector');
@@ -34,6 +35,10 @@ async function bootSolana() {
   });
   detector.start();
   console.log('[boot] ✅ listening for new pump.fun launches (Solana)...');
+
+  if (config.ENABLE_GRADUATION_WATCH) {
+    graduationWatcher.start((mint) => enterFromGraduation(mint));
+  }
 }
 
 async function bootBsc() {

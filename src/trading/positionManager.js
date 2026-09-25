@@ -1,10 +1,11 @@
 const { LAMPORTS_PER_SOL } = require('@solana/web3.js');
-const { PRICE_POLL_INTERVAL_MS, MAX_CONCURRENT_POSITIONS, SOL_MINT, DRY_RUN, SOL_FEE_RESERVE } = require('../config');
+const { PRICE_POLL_INTERVAL_MS, MAX_CONCURRENT_POSITIONS, SOL_MINT, DRY_RUN, SOL_FEE_RESERVE, ENABLE_GRADUATION_WATCH } = require('../config');
 const { computeTradeSize } = require('./sizing');
 const { resolveExit, evaluateExit } = require('./exitRules');
 const { entryMessage, exitMessage } = require('./present');
 const runtime = require('../live/runtime');
 const { assessAndGate } = require('../analysis/riskEngine');
+const graduationWatcher = require('../pumpfun/graduationWatcher');
 const { getQuote, buySol, sellToSol } = require('./jupiter');
 const { getSolBalance, loadWallet } = require('../solana/wallet');
 const { logTrade } = require('../db/tradeLog');
@@ -104,8 +105,15 @@ async function enterPosition(mint) {
   let assessment;
   try {
     // While paused / Solana is off the token is still assessed and reported,
-    // but must not consume one of today's slots.
-    assessment = await assessAndGate({ chain: 'solana', address: mint, consumeSlot: !pre.paused && pre.enableSolana });
+    // but must not consume one of today's slots. requireSellable:false lets
+    // a pre-migration token that passes everything else go to the
+    // graduation watcher instead of being discarded outright.
+    assessment = await assessAndGate({
+      chain: 'solana',
+      address: mint,
+      consumeSlot: !pre.paused && pre.enableSolana,
+      requireSellable: !ENABLE_GRADUATION_WATCH,
+    });
   } catch (err) {
     console.error(`[position] risk assessment failed for ${mint}, skipping (fail-closed):`, err.message);
     logTrade({ mint, chain: 'solana', event: 'skipped', reason: `risk assessment error: ${err.message}` });
@@ -117,6 +125,12 @@ async function enterPosition(mint) {
   logTrade({ mint, chain: 'solana', event: 'assessed', ...assessment });
   stateSync.recordAssessment({ ...assessment, chain: 'solana', address: mint });
   runtime.recordAssessed('solana', mint, assessment);
+
+  if (assessment.pendingGraduation) {
+    console.log(`[position] ${mint} passed every check but hasn't migrated yet — watching for graduation.`);
+    graduationWatcher.watch(mint, assessment);
+    return;
+  }
 
   if (assessment.recommended) {
     telegram.notify(findingsMessage(mint, assessment));
@@ -136,6 +150,69 @@ async function enterPosition(mint) {
     return;
   }
 
+  await buyAndTrack(mint, assessment, liveCfg);
+}
+
+// Called by the graduation watcher the instant a watched token's bonding
+// curve completes. Re-runs the FULL assessment (requireSellable:true) rather
+// than trusting the cached, possibly-minutes-old one — holder distribution
+// and taxes can change while a token is on the curve, and this is the exact
+// moment the bot commits real money, so it's worth the extra round trip.
+async function enterFromGraduation(mint) {
+  const pre = getConfig();
+  let assessment;
+  try {
+    assessment = await assessAndGate({
+      chain: 'solana',
+      address: mint,
+      consumeSlot: !pre.paused && pre.enableSolana,
+      requireSellable: true,
+    });
+  } catch (err) {
+    console.error(`[position] graduation re-assessment failed for ${mint}, skipping (fail-closed):`, err.message);
+    logTrade({ mint, chain: 'solana', event: 'skipped', reason: `graduation risk assessment error: ${err.message}` });
+    runtime.recordSkip('solana', 'risk assessment error');
+    return;
+  }
+
+  printFindings(mint, assessment);
+  logTrade({ mint, chain: 'solana', event: 'assessed_at_graduation', ...assessment });
+  stateSync.recordAssessment({ ...assessment, chain: 'solana', address: mint });
+  runtime.recordAssessed('solana', mint, assessment);
+
+  if (assessment.recommended) {
+    telegram.notify(`🎓 Just graduated — ${findingsMessage(mint, assessment)}`);
+  }
+  if (!assessment.recommended) {
+    console.log(`[position] ${mint} graduated but no longer passes (or quota/pause) — not buying.`);
+    return;
+  }
+
+  const liveCfg = getConfig();
+  if (liveCfg.paused || !liveCfg.enableSolana) {
+    console.log(`[position] ${mint} graduated and was recommended, but trading is paused/off — skipping entry.`);
+    runtime.recordSkip('solana', 'trading paused / chain off');
+    return;
+  }
+  if (openPositions.size + entering >= MAX_CONCURRENT_POSITIONS) {
+    runtime.recordSkip('solana', 'already holding/evaluating a position (max concurrent reached)');
+    console.log(`[position] ${mint} graduated but a position slot isn't free — skipping entry.`);
+    return;
+  }
+
+  runtime.recordGraduationBuy('solana');
+  entering += 1;
+  try {
+    await buyAndTrack(mint, assessment, liveCfg);
+  } finally {
+    entering -= 1;
+  }
+}
+
+// Sizes, buys, tracks and starts monitoring a position for an assessment
+// that has ALREADY been fully gated (tradeable + recommended). Shared by the
+// normal entry path and the graduation-triggered one.
+async function buyAndTrack(mint, assessment, liveCfg) {
   const wallet = loadWallet();
   const solBalance = await getSolBalance();
   const { size: sizeSol, limitedBy } = computeTradeSize({
@@ -332,4 +409,4 @@ async function exitPosition(mint, reason, pnlPct) {
   );
 }
 
-module.exports = { tryEnterPosition, openPositions };
+module.exports = { tryEnterPosition, openPositions, enterFromGraduation };

@@ -38,6 +38,11 @@ export async function PATCH(request) {
       max_hold_min: [0, 1440],
       max_risk_score: [1, 100],
       heartbeat_min: [0, 1440],
+      medium_max_dev_percent: [1, 100],
+      medium_max_top10_percent: [1, 100],
+      medium_max_score: [1, 100],
+      max_buy_tax_pct: [0, 100],
+      max_sell_tax_pct: [0, 100],
     };
     for (const [key, [lo, hi]] of Object.entries(RANGES)) {
       if (key in updates) {

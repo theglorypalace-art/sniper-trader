@@ -166,7 +166,7 @@ entirely if you only want one.
    - **🔎 Scanner** — proof it's actually working: feed connection status (with automatic reconnect if it goes silent), tokens seen → checked → passed → bought in the last hour, why any given token was rejected, and — if it's not buying — exactly why (paused, chain off, daily limit hit, one position already open).
    - **💰 Capital %** — % of balance per trade (any value, 0.01–100%) and the max-per-trade cap for each chain (or **No cap** to let the % alone decide).
    - **🎯 Take profit / 🛑 Stop loss / ⏱ Max hold** — override the automatic risk-tier exit plan with your own numbers, per chain trade. Changes apply to positions that are already open, immediately.
-   - **🛡 Risk tier**, **🔍 Filters** (dev%, top10%, and a risk-score entry-quality ceiling), **📅 Daily limit**.
+   - **🛡 Risk tier**, **🔍 Filters** (dev%, top10%, a risk-score entry-quality ceiling, plus **🎛 MEDIUM filters** — separate, usually looser dev%/top10%/score limits that apply only to MEDIUM-tier candidates — and **💸 Tax limits**, BSC-only max buy/sell tax), **📅 Daily limit**.
    - **💼 Wallet** — live SOL/BNB balance, wallet address, what the *next* trade would actually spend given your current settings, and whether the bot is locked to your Telegram chat.
 
    Security: the bot only responds to the chat whose ID matches `TELEGRAM_CHAT_ID` on Railway. Send `/start` (or open **💼 Wallet**) to see whether you're locked — if `TELEGRAM_CHAT_ID` isn't set, anyone who finds the bot can trade with your wallet, and it tells you so.
@@ -177,7 +177,11 @@ entirely if you only want one.
 
    Exit rule: every price poll (`PRICE_POLL_INTERVAL_MS`, default a few seconds) checks the live sell quote against take-profit / stop-loss / max hold and sells the whole position the instant one triggers. If a sell transaction fails, the bot keeps the position and retries automatically rather than losing track of it, and warns you in Telegram if it keeps failing.
 
-   One-time setup for the new settings: run `supabase/migrations/002_exit_and_scanner_settings.sql` in the Supabase SQL editor. Until you do, take-profit/stop-loss/max-hold/entry-quality/heartbeat still work from Telegram — they just reset to auto/default on the next restart, and the bot tells you so in `/status`.
+   One-time setup for the new settings: run `supabase/migrations/002_exit_and_scanner_settings.sql` **and** `supabase/migrations/003_medium_filters_and_tax.sql` in the Supabase SQL editor. Until you do, everything they add still works from Telegram — it just resets to default on the next restart, and the bot tells you so in `/status`.
+
+5. **Solana pre-migration tokens ("graduation watching").** Every pump.fun token starts on a bonding curve with no DEX route — Jupiter can't quote it, so it isn't buyable yet. Instead of rejecting these outright, the bot fully checks everything else (freeze/mint authority, dev%, top10%, tax) and, if it passes, adds it to a watchlist (`🔎 Scanner` shows it) and polls its on-chain curve state until it migrates ("graduates") to a real pool. The instant it does, the bot re-checks it fresh (holder distribution can shift while it waits) and buys immediately if it still passes — this is what actually lets the bot trade Solana tokens at all, given GoPlus/Jupiter can't see anything pre-migration. Turn it off with `ENABLE_GRADUATION_WATCH=false` on Railway to go back to immediate-only (which, currently, buys almost nothing on Solana).
+
+6. **Load shedding under heavy launch volume.** GoPlus's public tier is roughly 30 requests/minute; pump.fun alone can exceed that. Rather than queue every token and fall further behind, the bot throttles GoPlus calls and, once its queue backs up, skips roughly half of new arrivals outright — a token checked a minute late is often worse than one never checked, since the entry window's already gone. `/scanner` shows how many were skipped/dropped under load. Tune with `GOPLUS_MIN_INTERVAL_MS`, `GOPLUS_MAX_QUEUE`, `GOPLUS_SHED_AT_QUEUE` in `.env.example`.
 
 ### 4. Dashboard on Vercel (optional)
 

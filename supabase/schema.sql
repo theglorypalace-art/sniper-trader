@@ -26,6 +26,11 @@ create table if not exists bot_config (
   max_hold_min numeric not null default 0,      -- 0 = auto by risk tier
   max_risk_score numeric not null default 50,   -- entry quality gate (LOW <= 25, MEDIUM <= 50)
   heartbeat_min integer not null default 60,    -- 0 = off
+  medium_max_dev_percent numeric not null default 45,
+  medium_max_top10_percent numeric not null default 85,
+  medium_max_score numeric not null default 50,
+  max_buy_tax_pct numeric not null default 15,   -- BSC only
+  max_sell_tax_pct numeric not null default 15,  -- BSC only
   updated_at timestamptz not null default now(),
   updated_by text -- 'telegram', 'dashboard', 'default'
 );

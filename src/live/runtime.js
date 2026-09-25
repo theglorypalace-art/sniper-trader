@@ -17,6 +17,8 @@ const newChain = () => ({
   rejects: {}, // reason bucket -> count
   skips: {}, // why a safe token still wasn't entered -> count
   buckets: new Map(), // minuteKey -> counters
+  watchlistSize: 0,
+  watchTotals: { added: 0, expired: 0, graduated: 0, dropped: 0, boughtAtGraduation: 0 },
 });
 const chains = { solana: newChain(), bsc: newChain() };
 let recent = [];
@@ -96,7 +98,11 @@ function recordAssessed(chain, address, a) {
   const b = bucket(chain);
   b.assessed += 1;
 
-  if (!a.tradeable) {
+  if (a.pendingGraduation) {
+    // Not a rejection — it passed everything except "is it tradeable yet".
+    // The graduation watcher (src/pumpfun/graduationWatcher.js) owns its
+    // own counters for what happens to it next.
+  } else if (!a.tradeable) {
     bump(c.rejects, classifyReject(a));
   } else {
     c.totals.passed += 1;
@@ -167,6 +173,29 @@ function _reset() {
   for (const k of Object.keys(positionSources)) delete positionSources[k];
 }
 
+// ---- graduation watcher hooks ----
+function recordWatchAdded(chain, currentSize) {
+  const c = chains[chain];
+  c.watchTotals.added += 1;
+  c.watchlistSize = currentSize;
+}
+function setWatchlistSize(chain, n) {
+  chains[chain].watchlistSize = n;
+}
+function recordWatchExpired(chain) {
+  chains[chain].watchTotals.expired += 1;
+}
+function recordWatchDropped(chain, reason) {
+  chains[chain].watchTotals.dropped += 1;
+  bump(chains[chain].skips, `graduation watch: ${reason}`);
+}
+function recordGraduation(chain) {
+  chains[chain].watchTotals.graduated += 1;
+}
+function recordGraduationBuy(chain) {
+  chains[chain].watchTotals.boughtAtGraduation += 1;
+}
+
 module.exports = {
   setDetector,
   touch,
@@ -179,5 +208,11 @@ module.exports = {
   getOpenPositions,
   windowSum,
   snapshot,
+  recordWatchAdded,
+  setWatchlistSize,
+  recordWatchExpired,
+  recordWatchDropped,
+  recordGraduation,
+  recordGraduationBuy,
   _reset,
 };

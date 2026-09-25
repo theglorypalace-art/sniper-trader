@@ -157,6 +157,62 @@ const SETTINGS = {
     parent: 'scan',
     describe: () => `Every N minutes the bot messages you a "still scanning" summary: is the feed alive, how many new tokens it checked, how many passed, and your open positions. Off = only alerts on real events.`,
   },
+  mediumMaxDevPercent: {
+    cmd: 'setmediumdev',
+    title: '🎛 MEDIUM dev% allowance',
+    unit: '%',
+    min: 1,
+    max: 100,
+    presets: [30, 35, 40, 45, 50, 60, 75, 100],
+    steps: [1, 5],
+    parent: 'm:medium',
+    describe: (c) => `A LOW-tier token still must clear your ${c.maxDevPercent}% limit. This is the LOOSER ceiling used ONLY for a token that would otherwise become MEDIUM risk — above this, it's rejected outright either way. Only matters while 🛡 Risk tier allows MEDIUM.`,
+  },
+  mediumMaxTop10Percent: {
+    cmd: 'setmediumtop10',
+    title: '🎛 MEDIUM top-10% allowance',
+    unit: '%',
+    min: 1,
+    max: 100,
+    presets: [60, 70, 80, 85, 90, 95, 100],
+    steps: [1, 5],
+    parent: 'm:medium',
+    describe: (c) => `Same idea for top-10 holder concentration — the looser ceiling used only for MEDIUM-tier candidates. Your LOW-tier limit stays ${c.maxTop10Percent}%.`,
+  },
+  mediumMaxScore: {
+    cmd: 'setmediumscore',
+    title: '🎛 MEDIUM entry-quality ceiling',
+    unit: '',
+    min: 1,
+    max: 100,
+    int: true,
+    presets: [26, 30, 35, 40, 45, 50],
+    steps: [1, 5],
+    parent: 'm:medium',
+    describe: (c) => `A tighter version of your overall entry-quality score (≤ ${c.maxRiskScore}) that applies ONLY to MEDIUM-tier tokens. Set it below ${c.maxRiskScore} to be pickier about MEDIUM without touching LOW-tier entries.`,
+  },
+  maxBuyTaxPct: {
+    cmd: 'setbuytax',
+    title: '💸 Max buy tax (BSC)',
+    unit: '%',
+    min: 0,
+    max: 100,
+    presets: [3, 5, 8, 10, 15, 20, 30, 50],
+    steps: [1, 5],
+    parent: 'm:tax',
+    describe: () => `Tokens with a buy tax above this are rejected outright. BSC only — Solana/pump.fun tokens don't have this concept.`,
+  },
+  maxSellTaxPct: {
+    cmd: 'setselltax',
+    title: '💸 Max sell tax (BSC)',
+    unit: '%',
+    min: 0,
+    max: 100,
+    presets: [3, 5, 8, 10, 15, 20, 30, 50],
+    steps: [1, 5],
+    parent: 'm:tax',
+    describe: () => `Tokens with a sell tax above this are rejected outright — this is the one that actually eats into your exit, so keep it tight. BSC only.`,
+  },
   maxDevPercent: {
     cmd: 'setdev',
     title: '🔍 Max dev/creator holding',
@@ -331,6 +387,7 @@ function filtersView(cfg) {
     [
       [btn(`Dev ≤ ${fmt(cfg.maxDevPercent)}%`, 'v:maxDevPercent'), btn(`Top10 ≤ ${fmt(cfg.maxTop10Percent)}%`, 'v:maxTop10Percent')],
       [btn(`🎚 Entry quality (score ≤ ${fmt(cfg.maxRiskScore)})`, 'v:maxRiskScore')],
+      [btn('🎛 MEDIUM filters →', 'm:medium'), btn('💸 Tax limits (BSC) →', 'm:tax')],
       [btn('⬅️ Back', 'menu')],
     ]
   );
@@ -351,6 +408,36 @@ function exitView(cfg, banner) {
       [btn(`🎯 Take profit (${cfg.takeProfitPct > 0 ? '+' + fmt(cfg.takeProfitPct) + '%' : 'auto'})`, 'v:takeProfitPct'), btn(`🛑 Stop loss (${cfg.stopLossPct > 0 ? '−' + fmt(cfg.stopLossPct) + '%' : 'auto'})`, 'v:stopLossPct')],
       [btn(`⏱ Max hold (${cfg.maxHoldMin > 0 ? fmt(cfg.maxHoldMin) + 'm' : 'auto'})`, 'v:maxHoldMin'), btn('📈 Positions', 'pos')],
       [btn('⬅️ Back', 'menu')],
+    ]
+  );
+}
+
+function mediumFiltersView(cfg, banner) {
+  const active = cfg.minRecommendTier === 'LOW_MEDIUM';
+  return view(
+    (banner ? `${banner}\n\n` : '') +
+      `🎛 MEDIUM-tier filters\n\n` +
+      `${active ? '✅ Active — 🛡 Risk tier currently allows MEDIUM.' : '⚠️ Not in effect right now — 🛡 Risk tier is set to LOW only, so these limits are ignored (everything must clear the LOW limits in 🔍 Filters instead).'}\n\n` +
+      `Dev allowance: ${fmt(cfg.mediumMaxDevPercent)}%\nTop-10 allowance: ${fmt(cfg.mediumMaxTop10Percent)}%\nScore ceiling: ${fmt(cfg.mediumMaxScore)}\n\n` +
+      `These are separate, usually LOOSER limits that apply only to a token that would otherwise be scored MEDIUM risk. A LOW-tier token is unaffected — it always needs your 🔍 Filters numbers regardless of these.`,
+    [
+      [btn(`Dev ≤ ${fmt(cfg.mediumMaxDevPercent)}%`, 'v:mediumMaxDevPercent'), btn(`Top10 ≤ ${fmt(cfg.mediumMaxTop10Percent)}%`, 'v:mediumMaxTop10Percent')],
+      [btn(`Score ≤ ${fmt(cfg.mediumMaxScore)}`, 'v:mediumMaxScore')],
+      [btn('🛡 Risk tier', 'm:risk'), btn('🔍 Filters', 'm:filters')],
+      [btn('⬅️ Back', 'menu')],
+    ]
+  );
+}
+
+function taxFiltersView(cfg, banner) {
+  return view(
+    (banner ? `${banner}\n\n` : '') +
+      `💸 Tax limits — BSC only\n\n` +
+      `Max buy tax: ${fmt(cfg.maxBuyTaxPct)}%\nMax sell tax: ${fmt(cfg.maxSellTaxPct)}%\n\n` +
+      `A token whose buy or sell tax is above either limit is rejected outright, before any other check. Sell tax matters most — it's what eats into your exit.`,
+    [
+      [btn(`Buy tax ≤ ${fmt(cfg.maxBuyTaxPct)}%`, 'v:maxBuyTaxPct'), btn(`Sell tax ≤ ${fmt(cfg.maxSellTaxPct)}%`, 'v:maxSellTaxPct')],
+      [btn('🔍 Filters', 'm:filters'), btn('⬅️ Back', 'menu')],
     ]
   );
 }
@@ -440,6 +527,8 @@ const HELP_TEXT =
   `/setmaxhold <min> — force-sell after this many minutes\n\n` +
   `Selectivity & safety:\n` +
   `/setscore <n> — entry quality: only tokens with risk score ≤ n\n` +
+  `/setmediumdev, /setmediumtop10, /setmediumscore — looser limits used ONLY for MEDIUM-tier tokens (needs 🛡 Risk tier = LOW+MEDIUM)\n` +
+  `/setbuytax, /setselltax — BSC only: reject tokens taxed above this %\n` +
   `/setheartbeat <min|off> — "still scanning" summary every N minutes\n` +
   `/setmax <n> — max tokens per day\n` +
   `/setrisk low|lowmedium — only LOW risk, or LOW+MEDIUM\n` +
@@ -716,6 +805,8 @@ function start() {
             : arg1 === 'risk' ? riskView(getConfig())
             : arg1 === 'filters' ? filtersView(getConfig())
             : arg1 === 'exit' ? exitView(getConfig())
+            : arg1 === 'medium' ? mediumFiltersView(getConfig())
+            : arg1 === 'tax' ? taxFiltersView(getConfig())
             : mainView(getConfig());
           break;
 

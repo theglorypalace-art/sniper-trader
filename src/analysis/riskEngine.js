@@ -74,17 +74,18 @@ function finalize(input) {
 
 // -------------------- Solana / pump.fun --------------------
 
-async function assessSolanaToken(mint) {
+// requireSellable=false (the default when the graduation watcher is on) lets
+// a token that passes every OTHER check but isn't tradeable yet — because its
+// pump.fun bonding curve hasn't migrated to a real DEX pool — come back as
+// "pendingGraduation" instead of a hard reject. The caller then watches it
+// and re-checks the instant it migrates, rather than throwing it away purely
+// because Jupiter can't route to a bonding-curve-only token.
+async function assessSolanaToken(mint, { requireSellable = true } = {}) {
   const cfg = getConfig();
   const maxDevPercent = cfg.maxDevPercent ?? 30;
   const maxTop10Percent = cfg.maxTop10Percent ?? 70;
   const reasons = [];
   let score = 0;
-
-  const sellable = await canSell(mint);
-  if (!sellable) {
-    return reject('solana', mint, 'No sell route found right now (possible honeypot or dead liquidity).');
-  }
 
   let sec = null;
   try {
@@ -116,23 +117,39 @@ async function assessSolanaToken(mint) {
     }
   }
 
+  const mediumOk = cfg.minRecommendTier === 'LOW_MEDIUM';
+  const devHardCap = mediumOk ? Math.max(maxDevPercent, cfg.mediumMaxDevPercent) : maxDevPercent;
+  const top10HardCap = mediumOk ? Math.max(maxTop10Percent, cfg.mediumMaxTop10Percent) : maxTop10Percent;
+
   if (devPercent != null) {
-    if (devPercent > maxDevPercent) {
-      return reject('solana', mint, `Creator/dev wallet holds ~${devPercent.toFixed(1)}% of supply — over the ${maxDevPercent}% limit.`);
+    if (devPercent > devHardCap) {
+      return reject('solana', mint, `Creator/dev wallet holds ~${devPercent.toFixed(1)}% of supply — over your ${devHardCap}% limit.`);
     }
-    score += Math.min(40, devPercent * 2);
-    reasons.push(`Dev/creator wallet holds ~${devPercent.toFixed(1)}% of supply.`);
+    if (devPercent > maxDevPercent) {
+      // Over the LOW-tier limit but within the looser MEDIUM allowance —
+      // don't reject, but weight it heavily enough that it can't land as LOW.
+      score += 40;
+      reasons.push(`Dev/creator wallet holds ~${devPercent.toFixed(1)}% of supply — above your LOW limit (${maxDevPercent}%) but within your MEDIUM allowance (${cfg.mediumMaxDevPercent}%).`);
+    } else {
+      score += Math.min(40, devPercent * 2);
+      reasons.push(`Dev/creator wallet holds ~${devPercent.toFixed(1)}% of supply.`);
+    }
   } else {
     reasons.push('Could not confirm dev wallet holding % from available data.');
     score += 8;
   }
 
   if (top10Percent != null) {
-    if (top10Percent > maxTop10Percent) {
-      return reject('solana', mint, `Top 10 holders control ~${top10Percent.toFixed(1)}% of supply — over the ${maxTop10Percent}% limit.`);
+    if (top10Percent > top10HardCap) {
+      return reject('solana', mint, `Top 10 holders control ~${top10Percent.toFixed(1)}% of supply — over your ${top10HardCap}% limit.`);
     }
-    if (top10Percent > 20) score += Math.min(25, top10Percent - 20);
-    reasons.push(`Top 10 holders control ~${top10Percent.toFixed(1)}% of supply.`);
+    if (top10Percent > maxTop10Percent) {
+      score += 25;
+      reasons.push(`Top 10 holders control ~${top10Percent.toFixed(1)}% of supply — above your LOW limit (${maxTop10Percent}%) but within your MEDIUM allowance (${cfg.mediumMaxTop10Percent}%).`);
+    } else {
+      if (top10Percent > 20) score += Math.min(25, top10Percent - 20);
+      reasons.push(`Top 10 holders control ~${top10Percent.toFixed(1)}% of supply.`);
+    }
   }
 
   const curveState = await getBondingCurveState(mint).catch(() => null);
@@ -161,7 +178,7 @@ async function assessSolanaToken(mint) {
     reasons.push('Holdings look broadly distributed — reads as a community coin rather than a dev-controlled one.');
   }
 
-  return finalize({
+  const finalized = finalize({
     chain: 'solana',
     address: mint,
     score,
@@ -173,6 +190,41 @@ async function assessSolanaToken(mint) {
     curveProgressPct: progressPct,
     migrated,
   });
+
+  // Tier alone already disqualifies it (too risky) — migration status is
+  // irrelevant, this is a real reject.
+  if (!finalized.tradeable) return finalized;
+
+  // A pre-migration token has no DEX route yet almost by definition, so
+  // skip the wasted Jupiter call and go straight to "not sellable" — unless
+  // the caller demands a definitive answer right now (requireSellable),
+  // e.g. the graduation watcher's own final check.
+  const sellable = migrated === false && !requireSellable ? false : await canSell(mint);
+
+  if (sellable) return finalized;
+
+  if (migrated === false && !requireSellable) {
+    // Everything else about this token passed — it just isn't tradeable
+    // yet because its bonding curve hasn't migrated to a real pool. Hand it
+    // to the graduation watcher instead of discarding it.
+    return {
+      ...finalized,
+      tradeable: false,
+      pendingGraduation: true,
+      reasons: [...finalized.reasons, 'No swap route yet — bonding curve has not migrated. Watching for graduation.'],
+    };
+  }
+
+  return {
+    ...finalized,
+    tradeable: false,
+    reasons: [
+      ...finalized.reasons,
+      migrated
+        ? 'No sell route found even though the bonding curve shows migrated — could be a very fresh/illiquid pool, or a honeypot.'
+        : 'No sell route found right now (possible honeypot or dead liquidity).',
+    ],
+  };
 }
 
 // -------------------- BNB Smart Chain / PancakeSwap --------------------
@@ -207,26 +259,37 @@ async function assessBscToken(address) {
     return reject('bsc', address, 'Contract has a self-destruct function.');
   }
 
+  const maxBuyTaxPct = cfg.maxBuyTaxPct ?? 15;
+  const maxSellTaxPct = cfg.maxSellTaxPct ?? 15;
   const buyTax = Number(sec.buy_tax || 0) * 100;
   const sellTax = Number(sec.sell_tax || 0) * 100;
   if (buyTax >= 100 || sellTax >= 100 || sec.cannot_buy === '1') {
     return reject('bsc', address, 'Cannot actually buy and/or sell this token right now.');
   }
-  if (buyTax > 15 || sellTax > 15) {
-    return reject('bsc', address, `Buy/sell tax too high (buy ${buyTax.toFixed(1)}%, sell ${sellTax.toFixed(1)}%) to safely flip.`);
+  if (buyTax > maxBuyTaxPct || sellTax > maxSellTaxPct) {
+    return reject('bsc', address, `Buy/sell tax too high (buy ${buyTax.toFixed(1)}%, sell ${sellTax.toFixed(1)}%) — over your ${maxBuyTaxPct}%/${maxSellTaxPct}% limit.`);
   }
   if (buyTax + sellTax > 10) {
     score += 15;
     reasons.push(`Combined buy+sell tax is ${(buyTax + sellTax).toFixed(1)}% — eats into any quick exit.`);
   }
 
+  const mediumOk = cfg.minRecommendTier === 'LOW_MEDIUM';
+  const devHardCap = mediumOk ? Math.max(maxDevPercent, cfg.mediumMaxDevPercent) : maxDevPercent;
+  const top10HardCap = mediumOk ? Math.max(maxTop10Percent, cfg.mediumMaxTop10Percent) : maxTop10Percent;
+
   const devPercent = sec.owner_percent != null && sec.owner_percent !== '' ? Number(sec.owner_percent) * 100 : null;
   if (devPercent != null) {
-    if (devPercent > maxDevPercent) {
-      return reject('bsc', address, `Owner wallet holds ~${devPercent.toFixed(1)}% of supply — over the ${maxDevPercent}% limit.`);
+    if (devPercent > devHardCap) {
+      return reject('bsc', address, `Owner wallet holds ~${devPercent.toFixed(1)}% of supply — over your ${devHardCap}% limit.`);
     }
-    score += Math.min(40, devPercent * 2);
-    reasons.push(`Owner/dev wallet holds ~${devPercent.toFixed(1)}% of supply.`);
+    if (devPercent > maxDevPercent) {
+      score += 40;
+      reasons.push(`Owner/dev wallet holds ~${devPercent.toFixed(1)}% of supply — above your LOW limit (${maxDevPercent}%) but within your MEDIUM allowance (${cfg.mediumMaxDevPercent}%).`);
+    } else {
+      score += Math.min(40, devPercent * 2);
+      reasons.push(`Owner/dev wallet holds ~${devPercent.toFixed(1)}% of supply.`);
+    }
   } else {
     reasons.push('No confirmed owner address/holding — could mean renounced, could mean hidden.');
     score += 8;
@@ -234,11 +297,16 @@ async function assessBscToken(address) {
 
   const holders = Array.isArray(sec.holders) ? sec.holders : [];
   const top10Percent = holders.reduce((sum, h) => sum + Number(h.percent || 0), 0) * 100;
-  if (top10Percent > maxTop10Percent) {
-    return reject('bsc', address, `Top 10 holders control ~${top10Percent.toFixed(1)}% of supply — over the ${maxTop10Percent}% limit.`);
+  if (top10Percent > top10HardCap) {
+    return reject('bsc', address, `Top 10 holders control ~${top10Percent.toFixed(1)}% of supply — over your ${top10HardCap}% limit.`);
   }
-  if (top10Percent > 20) score += Math.min(25, top10Percent - 20);
-  if (holders.length) reasons.push(`Top 10 holders control ~${top10Percent.toFixed(1)}% of supply.`);
+  if (top10Percent > maxTop10Percent) {
+    score += 25;
+    reasons.push(`Top 10 holders control ~${top10Percent.toFixed(1)}% of supply — above your LOW limit (${maxTop10Percent}%) but within your MEDIUM allowance (${cfg.mediumMaxTop10Percent}%).`);
+  } else {
+    if (top10Percent > 20) score += Math.min(25, top10Percent - 20);
+    if (holders.length) reasons.push(`Top 10 holders control ~${top10Percent.toFixed(1)}% of supply.`);
+  }
 
   if (sec.is_mintable === '1') {
     score += 20;
@@ -286,16 +354,15 @@ async function assessBscToken(address) {
   });
 }
 
-// Runs the full assessment, applies the live "minimum tier to recommend"
-// gate, then the "very selective, max N/day" gate. Reads both from live
-// config so they're adjustable from Telegram/the dashboard without a
-// redeploy. Everything evaluated is still returned (with full reasoning)
-// for instant feedback — only assessment.recommended changes.
-async function assessAndGate({ chain, address, consumeSlot = true }) {
-  const cfg = getConfig();
-  const assessment = chain === 'solana' ? await assessSolanaToken(address) : await assessBscToken(address);
+// Applies the live "minimum tier to recommend" gate, the entry-quality
+// score ceiling, then the "very selective, max N/day" gate, to an assessment
+// that's ALREADY been produced. Split out from assessAndGate so the
+// graduation watcher can apply the exact same gating logic — using
+// up-to-the-minute settings and daily-quota state — after its own final
+// sellability recheck, without re-running the full (expensive) assessment.
+function gateAssessment(assessment, cfg, { consumeSlot = true } = {}) {
   if (!assessment.tradeable) {
-    assessment.blockedBy = 'unsafe';
+    assessment.blockedBy = assessment.pendingGraduation ? 'pendingGraduation' : 'unsafe';
     return assessment;
   }
 
@@ -306,9 +373,13 @@ async function assessAndGate({ chain, address, consumeSlot = true }) {
   }
 
   // Entry-quality gate: your own ceiling on the risk score (lower = pickier).
-  const maxScore = cfg.maxRiskScore ?? 50;
+  // MEDIUM-tier tokens can additionally be held to a tighter ceiling than
+  // the overall one via mediumMaxScore (defaults to the same as maxRiskScore,
+  // i.e. no extra restriction, until you lower it).
+  const maxScore =
+    assessment.verdict === 'MEDIUM' ? Math.min(cfg.maxRiskScore ?? 50, cfg.mediumMaxScore ?? 50) : cfg.maxRiskScore ?? 50;
   if (assessment.score > maxScore) {
-    assessment.reasons.push(`Risk score ${assessment.score} is above your entry limit of ${maxScore}.`);
+    assessment.reasons.push(`Risk score ${assessment.score} is above your entry limit of ${maxScore}${assessment.verdict === 'MEDIUM' ? ' for MEDIUM-risk tokens' : ''}.`);
     assessment.blockedBy = 'score';
     return assessment;
   }
@@ -332,4 +403,15 @@ async function assessAndGate({ chain, address, consumeSlot = true }) {
   return assessment;
 }
 
-module.exports = { assessSolanaToken, assessBscToken, assessAndGate };
+// Runs the full assessment then gates it. `requireSellable: false` (the
+// default for Solana while the graduation watcher is enabled) lets tokens
+// that only lack a swap route come back as "pendingGraduation" — still not
+// tradeable now, but not a permanent reject either.
+async function assessAndGate({ chain, address, consumeSlot = true, requireSellable = true }) {
+  const cfg = getConfig();
+  const assessment =
+    chain === 'solana' ? await assessSolanaToken(address, { requireSellable }) : await assessBscToken(address);
+  return gateAssessment(assessment, cfg, { consumeSlot });
+}
+
+module.exports = { assessSolanaToken, assessBscToken, assessAndGate, gateAssessment };

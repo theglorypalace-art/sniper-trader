@@ -8,10 +8,16 @@
 // failed/empty lookup as "unknown", not as "safe". The risk engine in
 // riskEngine.js scores conservatively when this returns nothing useful.
 
+const { goplusLimiter } = require('./rateLimiter');
+
 const GOPLUS_BASE = 'https://api.gopluslabs.io';
 const BSC_CHAIN_ID = '56';
 
 async function fetchJson(url) {
+  return goplusLimiter.run(() => fetchJsonNow(url));
+}
+
+async function fetchJsonNow(url) {
   const res = await fetch(url);
   if (!res.ok) {
     throw new Error(`GoPlus request failed: ${res.status} ${await res.text()}`);

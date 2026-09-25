@@ -9,11 +9,13 @@ function required(name) {
 const DRY_RUN = process.env.DRY_RUN !== 'false'; // SAFE DEFAULT: true. Must explicitly set "false" to trade for real.
 const ENABLE_SOLANA = process.env.ENABLE_SOLANA !== 'false'; // default true
 const ENABLE_BSC = process.env.ENABLE_BSC === 'true'; // default false — opt in once you're ready
+const ENABLE_GRADUATION_WATCH = process.env.ENABLE_GRADUATION_WATCH !== 'false'; // default true — watch pre-migration tokens instead of discarding them
 
 module.exports = {
   DRY_RUN,
   ENABLE_SOLANA,
   ENABLE_BSC,
+  ENABLE_GRADUATION_WATCH,
 
   // ---- Solana / pump.fun ----
   HELIUS_API_KEY: ENABLE_SOLANA ? required('HELIUS_API_KEY') : process.env.HELIUS_API_KEY || null,

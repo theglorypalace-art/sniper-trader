@@ -21,11 +21,23 @@ let cached = {
   maxHoldMin: 0, // 0 = auto by risk tier
   maxRiskScore: 50, // only enter tokens scoring <= this
   heartbeatMin: Number(process.env.HEARTBEAT_MIN || 60), // 0 = off
+  // Separate, looser ceilings that apply ONLY when a token would otherwise
+  // land as MEDIUM risk and minRecommendTier allows MEDIUM. A LOW-tier
+  // token is still governed by maxDevPercent/maxTop10Percent/maxRiskScore.
+  mediumMaxDevPercent: 45,
+  mediumMaxTop10Percent: 85,
+  mediumMaxScore: 50, // effectively "no extra restriction" until lowered below maxRiskScore
+  // BSC-only: reject any token whose buy or sell tax exceeds these.
+  maxBuyTaxPct: 15,
+  maxSellTaxPct: 15,
 };
 
-// The settings added by supabase/migrations/002_*.sql. Until that migration
-// has been run, these live in memory only.
-const MIGRATION_KEYS = ['takeProfitPct', 'stopLossPct', 'maxHoldMin', 'maxRiskScore', 'heartbeatMin'];
+// The settings added by supabase/migrations/002_*.sql and 003_*.sql. Until
+// those have been run, these live in memory only.
+const MIGRATION_KEYS = [
+  'takeProfitPct', 'stopLossPct', 'maxHoldMin', 'maxRiskScore', 'heartbeatMin',
+  'mediumMaxDevPercent', 'mediumMaxTop10Percent', 'mediumMaxScore', 'maxBuyTaxPct', 'maxSellTaxPct',
+];
 let migrated = true;
 
 // Maps the camelCase keys used in code to the bot_config column names.
@@ -46,6 +58,11 @@ const COLUMNS = {
   maxHoldMin: 'max_hold_min',
   maxRiskScore: 'max_risk_score',
   heartbeatMin: 'heartbeat_min',
+  mediumMaxDevPercent: 'medium_max_dev_percent',
+  mediumMaxTop10Percent: 'medium_max_top10_percent',
+  mediumMaxScore: 'medium_max_score',
+  maxBuyTaxPct: 'max_buy_tax_pct',
+  maxSellTaxPct: 'max_sell_tax_pct',
 };
 
 // Value from a DB column, or the last known value if the column doesn't exist yet.
@@ -73,6 +90,11 @@ function mapRow(row) {
     maxHoldMin: num(row, 'max_hold_min', cached.maxHoldMin),
     maxRiskScore: num(row, 'max_risk_score', cached.maxRiskScore),
     heartbeatMin: num(row, 'heartbeat_min', cached.heartbeatMin),
+    mediumMaxDevPercent: num(row, 'medium_max_dev_percent', cached.mediumMaxDevPercent),
+    mediumMaxTop10Percent: num(row, 'medium_max_top10_percent', cached.mediumMaxTop10Percent),
+    mediumMaxScore: num(row, 'medium_max_score', cached.mediumMaxScore),
+    maxBuyTaxPct: num(row, 'max_buy_tax_pct', cached.maxBuyTaxPct),
+    maxSellTaxPct: num(row, 'max_sell_tax_pct', cached.maxSellTaxPct),
   };
 }
 

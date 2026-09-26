@@ -18,6 +18,7 @@ const { getBondingCurveState, curveProgressPct } = require('./pumpfunCurve');
 const { canSell } = require('../trading/safety');
 const { tryConsumeDailySlot } = require('./dailyLimiter');
 const { getConfig } = require('../live/liveConfig');
+const debull = require('../knowledge/debull');
 
 const RISK_TIERS = [
   { max: 25, label: 'LOW' },
@@ -50,17 +51,11 @@ function reject(chain, address, reason) {
 }
 
 function exitPlanFor(tier) {
-  // Aggressive targets for volatile meme market: aim 30-40%, exit fast, free the slot for the next one.
-  switch (tier) {
-    case 'LOW':
-      return { takeProfitPct: 40, stopLossPct: -30, maxHoldMs: 8 * 60 * 1000 };
-    case 'MEDIUM':
-      return { takeProfitPct: 35, stopLossPct: -35, maxHoldMs: 6 * 60 * 1000 };
-    case 'HIGH':
-      return { takeProfitPct: 30, stopLossPct: -40, maxHoldMs: 5 * 60 * 1000 };
-    default:
-      return { takeProfitPct: 25, stopLossPct: -40, maxHoldMs: 4 * 60 * 1000 };
-  }
+  // DE-BULL Academy knowledge (docs/DEBULL_KNOWLEDGE.md): protect capital,
+  // class stop ~-45%, targets in the 35–80% band for full auto exits (manual
+  // class plan uses partials toward 100–200%+). Longer holds so TP can print
+  // instead of flat max-hold exits at 5 minutes.
+  return debull.exitPlanFor(tier);
 }
 
 function finalize(input) {
@@ -161,6 +156,14 @@ async function assessSolanaToken(mint, { requireSellable = true } = {}) {
   const isCommunityCoin = devPercent != null && devPercent < 5 && (top10Percent == null || top10Percent < 40);
   if (isCommunityCoin) {
     reasons.push('Holdings look broadly distributed — reads as a community coin rather than a dev-controlled one.');
+  }
+
+  // DE-BULL: first pump / brand-new curve is often a trap; final stretch & migrated preferred.
+  const catBonus = debull.categoryQualityBonus(category);
+  if (catBonus !== 0) {
+    score = Math.max(0, score + catBonus);
+    if (catBonus > 0) reasons.push('DE-BULL: very new curve — first pump is often a trap (score +' + catBonus + ').');
+    else reasons.push('DE-BULL: ' + category + ' preferred over brand-new launches (score ' + catBonus + ').');
   }
 
   const finalized = finalize({

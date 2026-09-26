@@ -35,7 +35,7 @@ module.exports = {
   JUPITER_SWAP_URL: process.env.JUPITER_SWAP_URL || 'https://quote-api.jup.ag/v6/swap',
   SOL_MINT: 'So11111111111111111111111111111111111111112',
 
-  CAPITAL_PCT: Number(process.env.CAPITAL_PCT || 5), // % of wallet SOL balance per snipe
+  CAPITAL_PCT: Number(process.env.CAPITAL_PCT || 10), // DE-BULL: max ~10% of capital per trade
   MAX_POSITION_SOL: Number(process.env.MAX_POSITION_SOL || 0.5), // hard cap regardless of CAPITAL_PCT (0 = no cap)
   SOL_FEE_RESERVE: Number(process.env.SOL_FEE_RESERVE || 0.01), // SOL always left in the wallet for fees/rent, even at 100%
   MAX_CONCURRENT_POSITIONS: Number(process.env.MAX_CONCURRENT_POSITIONS || 1),
@@ -60,7 +60,7 @@ module.exports = {
   PANCAKESWAP_ROUTER: process.env.PANCAKESWAP_ROUTER || '0x10ED43C718714eb63d5aA57B78B54704E256024E',
   WBNB_ADDRESS: process.env.WBNB_ADDRESS || '0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c',
 
-  BSC_CAPITAL_PCT: Number(process.env.BSC_CAPITAL_PCT || 5),
+  BSC_CAPITAL_PCT: Number(process.env.BSC_CAPITAL_PCT || 10), // DE-BULL: ~10% of capital
   BSC_MAX_POSITION_BNB: Number(process.env.BSC_MAX_POSITION_BNB || 0.1), // 0 = no cap
   BNB_FEE_RESERVE: Number(process.env.BNB_FEE_RESERVE || 0.003), // BNB always left in the wallet for gas, even at 100%
   BSC_MAX_CONCURRENT_POSITIONS: Number(process.env.BSC_MAX_CONCURRENT_POSITIONS || 1),

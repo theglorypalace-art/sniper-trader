@@ -15,6 +15,14 @@ looked distributed can turn out to be linked, and no automated check
 replaces your own judgment. Read this whole README before touching real
 funds.
 
+## DE-BULL Academy knowledge base
+
+Strategy and risk rules from the DE-BULL 1-week masterclass are documented in
+[`docs/DEBULL_KNOWLEDGE.md`](docs/DEBULL_KNOWLEDGE.md) and applied in code via
+`src/knowledge/debull.js` (default **~10% capital per trade**, class-style
+**−45% stop**, longer holds so take-profit can print instead of flat 5-minute
+exits). Telegram overrides still win when you set TP/SL/max-hold yourself.
+
 ## A note on "Axiom.trade compatible"
 
 Axiom.Trade has no official public developer API. The unofficial

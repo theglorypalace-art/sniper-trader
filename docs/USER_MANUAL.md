@@ -1,213 +1,277 @@
-# Sniper Trader — Beginner User Manual
+# Sniper Trader — How to Use the Trading Tools
 
-A simple guide to set up the bot and control it for your own trading.  
-You do **not** need to read the code. Everything important is done with environment variables and Telegram.
-
----
-
-## 1. What this bot does (in plain words)
-
-1. Watches new meme-coin launches on Solana (and optionally BNB).
-2. Checks each coin against **your** rules (risk, market cap, holders, etc.).
-3. Can buy a small slice of your wallet balance when a coin passes.
-4. Can sell on take-profit, stop-loss, or a max hold time.
-5. You control all of that live from **Telegram** — no redeploy for normal settings.
-
-**Default safety:** the bot starts in **DRY RUN** (paper mode). It only uses real money when you explicitly turn that off.
+A short guide for new users. This covers **only** what you do inside the bot (mainly Telegram) to trade and control settings.
 
 ---
 
-## 2. What you need before starting
+## Open the control panel
 
-| Item | Why |
-|------|-----|
-| A **dedicated** trading wallet | Never use your main wallet. Create a new one and fund it with a small amount only. |
-| [Helius](https://helius.dev) API key | Solana data feed (free tier is enough to start). |
-| Telegram account + a bot from [@BotFather](https://t.me/BotFather) | Live control panel. |
-| Hosting (e.g. Railway) or a computer that stays online | The bot must run 24/7 to catch launches. |
-| Optional: [Supabase](https://supabase.com) free project | Saves your Telegram settings across restarts. |
-
----
-
-## 3. First-time setup (checklist)
-
-### Step A — Create a bot wallet
-1. Create a **new** Solana wallet (Phantom, Solflare, or CLI).
-2. Export the **private key** (base58). Keep it secret.
-3. Send only what you can afford to lose (example: 0.05–0.5 SOL to start).
-
-### Step B — Telegram bot
-1. Open Telegram → talk to **@BotFather** → `/newbot` → follow prompts.
-2. Copy the **bot token**.
-3. Start a chat with your new bot and send `/start`.
-4. Note the **chat ID** the bot shows you (or that your host logs). Put that in settings so only you can control the bot.
-
-### Step C — Environment variables
-Copy `.env.example` to `.env` (or fill the same keys on Railway). Minimum to run Solana in dry-run:
-
-```text
-DRY_RUN=true
-ENABLE_SOLANA=true
-ENABLE_BSC=false
-HELIUS_API_KEY=your_helius_key
-TELEGRAM_BOT_TOKEN=your_bot_token
-TELEGRAM_CHAT_ID=your_numeric_chat_id
-```
-
-When you are ready for **real** trades (only after testing):
-
-```text
-DRY_RUN=false
-WALLET_PRIVATE_KEY=your_base58_private_key
-```
-
-Optional but recommended (settings survive restarts):
-
-```text
-SUPABASE_URL=https://xxxx.supabase.co
-SUPABASE_SERVICE_KEY=your_service_role_key
-```
-
-Then in Supabase → SQL Editor, run the full `supabase/schema.sql` once (or the migrations if the project already exists). See `supabase/README.md`.
-
-### Step D — Start the service
-Deploy or run the app so it stays online. You should get a Telegram message that the scanner started, and `/menu` should work.
-
----
-
-## 4. Your control panel: Telegram
-
-Send:
+In your bot chat, send:
 
 ```text
 /menu
 ```
 
-Main buttons:
+That screen is your main dashboard. Use the buttons, or type the commands below.
 
-| Button | Purpose |
-|--------|---------|
-| **Start / Stop trading** | Pause new buys without shutting the bot down. |
-| **Solana / BSC ON·OFF** | Which chains are active. |
-| **Positions** | Open trades and live P&amp;L. |
-| **Scanner** | Is the feed alive? How many coins seen/passed. |
-| **Wallet** | Balance and address. |
-| **Capital %** | How much of the balance each buy may use (+ max size cap). |
-| **Take profit** | Exit targets (or “auto” by risk tier). |
-| **Risk tier** | Stricter (LOW only) or more open (LOW + MEDIUM). |
-| **Filters** | Dev %, top-10 holders, risk score. |
-| **Daily limit** | Max trades/recommendations per day. |
-| **Platforms** | Which launchpads to listen to. |
-| **Safety toggles** | Market cap floor, holder limits, mint/rug blocks. |
+---
 
-### Useful commands
+## Start or stop trading
+
+| Action | What it does |
+|--------|----------------|
+| **Start trading** | The bot may open new positions when a coin passes your rules. |
+| **Stop trading** | No new buys. Open positions can still be managed / exited by the bot. |
+
+Commands:
 
 ```text
-/status          — same as menu status
-/positions       — open positions
-/balance         — wallet
-/scanner         — feed health
-/analyze <CA>    — paste a contract address for a risk snapshot
-/settp 20        — take profit 20%
-/setsl 15        — stop loss 15%
-/setmaxhold 10   — max hold 10 minutes
-/setminmcap 10000 — min market cap $10,000 (0 = off)
-/setcapital 5    — 5% of balance per trade
-/starttrading    — resume
-/stoptrading     — pause
-/help            — command list
+/starttrading
+/stoptrading
 ```
 
-You can also **paste only a contract address** in the chat to run `/analyze`.
+---
+
+## Chains (Solana / BSC)
+
+On the menu, toggle:
+
+- **Solana ON / OFF** — listen and trade on Solana launchpads  
+- **BSC ON / OFF** — listen and trade on BNB (if enabled for your bot)
+
+Only turn on chains you intend to use.
 
 ---
 
-## 5. Suggested first settings (new users)
+## Platforms (where new coins are detected)
 
-Start **defensive**. Loosen later if you accept more risk.
+**Menu → Platforms**
 
-| Setting | Suggested start | Notes |
-|---------|-----------------|--------|
-| DRY_RUN | **true** | Watch behavior before real money. |
-| Capital % | **2–5%** | Small size per trade. |
-| Max per trade (SOL) | **0.05–0.2** | Hard ceiling. |
-| Daily limit | **3–10** | Avoid overtrading. |
-| Min market cap | **10000** or **0** | `0` = no MC gate; `$10k+` filters very early junk. |
-| Max risk score | **30–50** | Lower = pickier. |
-| Risk tier | **LOW only** first | Then try LOW + MEDIUM. |
-| Take profit | **15–30%** or auto | |
-| Stop loss | **10–25%** or auto | |
-| Max hold | **5–15 min** or auto | Fast exits on memes. |
-| Platforms | All ON, or only **pump.fun** at first | Fewer pads = quieter feed. |
+Turn each launchpad **ON** or **OFF**:
 
-Safety toggles (mint authority / creator rug / single holder) default **off** so nothing is silently blocking you. Turn them **on** in **Safety** if you want stricter protection.
+- pump.fun  
+- Raydium LaunchLab / LetsBonk  
+- Meteora / Believe  
+- Moonshot  
+- Boop.fun  
+
+**ON** = the bot watches that platform for new coins.  
+**OFF** = it ignores that platform.
+
+Start with the platforms you care about; fewer platforms means a quieter feed.
 
 ---
 
-## 6. How a typical trade cycle works
+## Capital (size of each buy)
 
-1. A new coin appears on a platform you enabled.
-2. The bot scores it and applies **your** filters.
-3. If it fails → skipped (you may see less spam; check `/scanner`).
-4. If it passes and trading is **not** paused → buy using capital % (and max size).
-5. Position is monitored → sell on TP, SL, or max hold.
-6. Telegram notifies buy / sell when configured.
+**Menu → Capital %**
 
-If buys fail often (slippage, empty balance, RPC), check **Wallet**, SOL for fees, and that `DRY_RUN=false` only when you intend live trading.
+| Control | Meaning |
+|---------|---------|
+| **Solana %** | Each Solana buy uses this percent of your SOL balance. |
+| **BSC %** | Same idea for BNB. |
+| **Max per trade** | Hard ceiling in SOL or BNB (or “no cap”). |
 
----
+Examples:
 
-## 7. Dry run vs live
+```text
+/setcapital 5
+```
 
-| Mode | `DRY_RUN` | Real funds |
-|------|-----------|------------|
-| Practice | `true` | No |
-| Live | `false` | Yes |
-
-Always test in dry run until `/scanner` looks healthy and you understand the alerts.
+→ about 5% of balance per Solana trade (still limited by max per trade if set).
 
 ---
 
-## 8. Common questions
+## Exit rules (when the bot sells)
 
-**“Nothing is trading.”**  
-- Trading paused? → Start trading.  
-- Still `DRY_RUN=true`? (That is OK for testing; no real fills.)  
-- Filters too tight? Raise score limit, set min MC to 0, check Platforms.  
-- Feed down? → `/scanner`.  
-- Daily limit reached? → raise daily limit or wait until UTC midnight.
+**Menu → Take profit** (exit section)
 
-**“I want looser / tighter rules.”**  
-Everything is on Telegram: Filters, Safety, Platforms, Exit, Capital. No code change required.
+| Setting | Meaning |
+|---------|---------|
+| **Take profit %** | Sell when profit reaches this % (or **Auto** by risk tier). |
+| **Stop loss %** | Sell when loss reaches this % (or **Auto**). |
+| **Max hold (minutes)** | Sell after this time if TP/SL did not fire (or **Auto**). |
 
-**“Can two people use one bot?”**  
-One `TELEGRAM_CHAT_ID` = one controller. For multiple users you need separate deployments and wallets.
+Examples:
 
-**“What about BSC?”**  
-Set `ENABLE_BSC=true`, add BSC RPC + dedicated BSC key, fund BNB for gas. Most beginners start Solana-only.
+```text
+/settp 20
+/setsl 15
+/setmaxhold 10
+```
 
----
+`0` or **Auto** = the bot chooses defaults from the coin’s risk tier.
 
-## 9. Safety habits
-
-- Dedicated wallet only; small balance.
-- Start dry-run; size up slowly.
-- Memecoins can go to zero — only risk money you can lose.
-- Never share private keys, bot token, or Supabase **service** key.
-- Keep `TELEGRAM_CHAT_ID` set so strangers cannot control the bot.
+These apply to new trades and are re-read while a position is open.
 
 ---
 
-## 10. Quick start (one page)
+## Risk tier
 
-1. New wallet → small SOL deposit.  
-2. Helius key + Telegram bot token + chat ID.  
-3. Env: `DRY_RUN=true`, `HELIUS_API_KEY`, `TELEGRAM_*`.  
-4. Deploy / run → `/menu`.  
-5. Set capital 5%, daily limit 5, tier LOW only.  
-6. Watch `/scanner` and alerts for a day.  
-7. When ready: `DRY_RUN=false` + `WALLET_PRIVATE_KEY`, tiny size first.
+**Menu → Risk tier**
+
+| Choice | Effect |
+|--------|--------|
+| **LOW only** | Stricter — fewer coins, safer-looking only. |
+| **LOW + MEDIUM** | More coins allowed through. |
+
+Pick **LOW only** if you want fewer, tighter entries; **LOW + MEDIUM** for more activity.
 
 ---
 
-*This manual is for operators of their own instance. It is not financial advice. Markets are volatile; past behavior of the bot does not guarantee future results.*
+## Filters (who gets in)
+
+**Menu → Filters**
+
+| Filter | Meaning |
+|--------|---------|
+| **Max dev %** | Skip if creator/dev holds more than this % of supply. High number (e.g. 99) ≈ almost off. |
+| **Max top-10 %** | Skip if top 10 holders control more than this %. |
+| **Max risk score** | Only enter if the bot’s score is at or below this. Lower = pickier. |
+
+Related:
+
+```text
+/setscore 40
+/setdev 30
+/settop10 70
+```
+
+**MEDIUM filters** (submenu) apply only when tier allows MEDIUM — slightly looser ceilings for those coins.
+
+---
+
+## Safety toggles (optional gates)
+
+**Menu → Safety toggles**
+
+| Toggle / limit | Meaning |
+|----------------|---------|
+| **Block mint authority** | ON = reject coins that can still mint new supply. |
+| **Block creator rugs** | ON = reject when data flags a bad creator history. |
+| **Min market cap** | Only enter if market cap is at least this USD amount. **0 = off**. |
+| **Max single holder %** | Reject if one wallet holds more than this %. **0 = off**. |
+| **Max high ownership %** | Reject if concentrated ownership is above this %. **0 = off**. |
+
+Examples:
+
+```text
+/setminmcap 10000
+/setminmcap 0
+/setsingle 25
+/sethighown 0
+```
+
+---
+
+## Daily limit
+
+**Menu → Daily limit**
+
+Maximum number of recommended / entered tokens per UTC day.
+
+```text
+/setmax 5
+```
+
+When the limit is hit, the bot waits until the next UTC day (or you raise the limit).
+
+---
+
+## Scanner
+
+**Menu → Scanner** or:
+
+```text
+/scanner
+```
+
+Shows whether the feed is connected, how many new coins were seen, checked, passed, and bought. Use this to confirm the bot is listening.
+
+---
+
+## Positions
+
+**Menu → Positions** or:
+
+```text
+/positions
+```
+
+Lists open trades and live profit/loss when available.
+
+---
+
+## Wallet / balance
+
+**Menu → Wallet** or:
+
+```text
+/balance
+```
+
+Shows balance and the bot wallet address for the active chain(s).
+
+---
+
+## Analyze a coin (manual check)
+
+Paste a **contract address** in the chat, or:
+
+```text
+/analyze <contract address>
+```
+
+You get a short report: risk-style verdict, market snapshot when available, and whether it fits **your current** filters — plus a suggested exit style. Useful before you change filters or to inspect a CA someone shared.
+
+---
+
+## Status
+
+```text
+/status
+```
+
+or **Refresh** on the menu — one screen: trading on/off, chains, capital, limits, scanner headline, open positions count.
+
+---
+
+## Simple flow for a new user
+
+1. Open `/menu`.  
+2. **Start trading**.  
+3. Set **Capital %** (e.g. 5%) and a **max per trade** if you want a ceiling.  
+4. Set **Take profit / Stop loss / Max hold** (or leave Auto).  
+5. Choose **Risk tier** (LOW only or LOW + MEDIUM).  
+6. Adjust **Filters** and **Safety** only if you want stricter or looser entries.  
+7. Turn on the **Platforms** you want.  
+8. Check **Scanner** that the feed is live.  
+9. Use **Positions** and Telegram alerts to follow open trades.  
+10. **Stop trading** anytime to pause new buys.
+
+---
+
+## Command cheat sheet
+
+| Command | Use |
+|---------|-----|
+| `/menu` | Full control panel |
+| `/status` | Status summary |
+| `/scanner` | Feed & funnel |
+| `/positions` | Open trades |
+| `/balance` | Wallet |
+| `/analyze <CA>` | Inspect a contract |
+| `/setcapital <n>` | Solana capital % |
+| `/settp <n>` | Take profit % |
+| `/setsl <n>` | Stop loss % |
+| `/setmaxhold <n>` | Max hold minutes |
+| `/setminmcap <n>` | Min market cap USD (`0` = off) |
+| `/setscore <n>` | Max risk score |
+| `/setmax <n>` | Daily limit |
+| `/starttrading` | Allow new buys |
+| `/stoptrading` | Pause new buys |
+| `/help` | List commands |
+
+---
+
+*Use the tools above to match how aggressive or selective you want the bot to be. All of these can be changed anytime from Telegram.*

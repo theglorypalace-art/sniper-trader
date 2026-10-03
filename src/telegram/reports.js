@@ -28,8 +28,15 @@ function feedLine(chain) {
   const c = runtime.snapshot().chains[chain];
   const icon = STATE_ICON[c.detector] || '⚪';
   const alive = c.lastMessageAt ? `last event ${ago(c.lastMessageAt)}` : 'no events yet';
-  const rc = c.reconnects ? ` · ${c.reconnects} reconnect${c.reconnects > 1 ? 's' : ''}` : '';
-  return `${meta.label}: ${icon} feed ${c.detector} (${alive}${rc})`;
+  const rc = c.reconnects > 0 ? ` · ${c.reconnects} WSS reconnect${c.reconnects > 1 ? 's' : ''}` : '';
+  // Poll fallback runs even while WSS reconnects — avoid sounding "dead" forever
+  const extra =
+    (c.detector === 'reconnecting' || c.detector === 'stalled') && c.lastMessageAt
+      ? ' · poll active'
+      : (c.detector === 'reconnecting' || c.detector === 'stalled')
+        ? ' · RPC poll fallback on'
+        : '';
+  return `${meta.label}: ${icon} feed ${c.detector} (${alive}${rc}${extra})`;
 }
 
 function openFor(chain) {

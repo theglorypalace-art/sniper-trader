@@ -7,10 +7,14 @@ const { LAUNCHPADS, matchLaunchpad, enabledLaunchpads } = require('./launchpads'
 const { getConfig } = require('../live/liveConfig');
 
 // Quiet feed → reconnect. Keep this generous; multi-pad can be bursty.
-const STALL_MS = Number(process.env.DETECTOR_STALL_MS || 120000);
+const STALL_MS = Number(process.env.DETECTOR_STALL_MS || 180000);
 const CONNECT_TIMEOUT_MS = 20000;
-const POLL_MS = Number(process.env.DETECTOR_POLL_MS || 20000);
-const PING_MS = 30000;
+// Poll is a FALLBACK only — keep sparse to avoid Helius 429s.
+const POLL_MS = Number(process.env.DETECTOR_POLL_MS || 60000);
+const PING_MS = 45000;
+const POLL_SIG_LIMIT = Number(process.env.DETECTOR_POLL_SIG_LIMIT || 5);
+const POLL_TX_BUDGET = Number(process.env.DETECTOR_POLL_TX_BUDGET || 2); // max getParsedTransaction per cycle
+
 
 async function resolveLaunchedMint(signature) {
   const connection = getConnection();
@@ -94,8 +98,6 @@ class PumpFunDetector {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       try {
         ws.ping();
-        // Keep subscription alive on providers that idle-out quiet sockets
-        ws.send(JSON.stringify({ jsonrpc: '2.0', id: 999001, method: 'getHealth' }));
       } catch (_) {
         /* ignore */
       }
@@ -105,20 +107,42 @@ class PumpFunDetector {
 
   startPoll() {
     if (this.pollTimer) return;
-    // RPC fallback: recent signatures on pump.fun (always highest volume)
+    this._pollCycle = 0;
+    this._pollBackoffUntil = 0;
     const tick = async () => {
+      if (Date.now() < this._pollBackoffUntil) return;
+      // Prefer WSS: if we got a message recently, skip RPC poll entirely
+      const wsOk =
+        this.ws &&
+        this.ws.readyState === WebSocket.OPEN &&
+        Date.now() - this.lastMsgAt < Math.min(STALL_MS, 90000);
+      if (wsOk) return;
+
       try {
-        await this.pollProgram(PUMPFUN_PROGRAM_ID || '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P', 'pump.fun');
-        const pads = enabledLaunchpads(getConfig());
-        for (const pad of pads) {
-          if (pad.id === 'pumpfun') continue;
-          await this.pollProgram(pad.programId, pad.name);
+        this._pollCycle += 1;
+        // Always poll pump (volume). Other pads only every 3rd cycle.
+        await this.pollProgram(
+          PUMPFUN_PROGRAM_ID || '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',
+          'pump.fun'
+        );
+        if (this._pollCycle % 3 === 0) {
+          const pads = enabledLaunchpads(getConfig()).filter((p) => p.id !== 'pumpfun');
+          // At most one extra pad per cycle
+          const pad = pads[this._pollCycle % Math.max(pads.length, 1)];
+          if (pad) await this.pollProgram(pad.programId, pad.name);
         }
       } catch (err) {
-        console.warn('[launchpad-detector] poll error:', err.message);
+        const msg = String(err.message || err);
+        if (/429|Too Many|rate limit/i.test(msg)) {
+          this._pollBackoffUntil = Date.now() + 120000;
+          console.warn('[launchpad-detector] RPC 429 — pausing poll 2 minutes');
+        } else {
+          console.warn('[launchpad-detector] poll error:', msg.slice(0, 200));
+        }
       }
     };
-    tick();
+    // First poll after a delay so boot does not stampede RPC
+    setTimeout(tick, 15000);
     this.pollTimer = setInterval(tick, POLL_MS);
     if (this.pollTimer.unref) this.pollTimer.unref();
   }
@@ -129,41 +153,36 @@ class PumpFunDetector {
     try {
       sigs = await connection.getSignaturesForAddress(
         new PublicKey(programId),
-        { limit: 12 },
+        { limit: POLL_SIG_LIMIT },
         'confirmed'
       );
     } catch (err) {
-      // Invalid program id (e.g. bad Boop) — skip quietly
       if (/Invalid|public key/i.test(err.message)) return;
+      if (/429|Too Many|rate limit/i.test(err.message)) throw err;
       throw err;
     }
     if (!sigs || !sigs.length) return;
     this.touch();
-    runtime.setDetector('solana', 'connected');
+    if (runtime.snapshot().chains.solana.detector !== 'connected') {
+      runtime.setDetector('solana', 'connected');
+    }
 
+    let txBudget = POLL_TX_BUDGET;
     for (const s of sigs) {
       if (!s || !s.signature || s.err) continue;
       if (this.seenSigs.has(s.signature)) continue;
       this.seenSigs.add(s.signature);
-      if (this.seenSigs.size > 2000) {
-        const drop = [...this.seenSigs].slice(0, 500);
+      if (this.seenSigs.size > 1500) {
+        const drop = [...this.seenSigs].slice(0, 400);
         for (const d of drop) this.seenSigs.delete(d);
       }
-      // Only process relatively fresh txs (last ~3 min) to avoid backlog on boot
-      if (s.blockTime && Date.now() / 1000 - s.blockTime > 180) continue;
+      if (s.blockTime && Date.now() / 1000 - s.blockTime > 120) continue;
+      if (txBudget <= 0) break;
+      txBudget -= 1;
 
       try {
         const mint = await resolveLaunchedMint(s.signature);
         if (!mint || this.seenMint.has(mint)) continue;
-        // Heuristic: new mint in a recent program tx ≈ launch
-        const tx = await getConnection().getParsedTransaction(s.signature, {
-          maxSupportedTransactionVersion: 0,
-          commitment: 'confirmed',
-        });
-        const logs = (tx && tx.meta && tx.meta.logMessages) || [];
-        if (!mint) continue;
-        // Prefer create-instruction logs; still allow new mint on very fresh txs
-        if (!looksLikeCreate(logs) && s.blockTime && Date.now() / 1000 - s.blockTime > 90) continue;
         this.seenMint.add(mint);
         const pad = enabledLaunchpads(getConfig()).find((p) => p.programId === programId) || {
           id: 'unknown',
@@ -178,7 +197,8 @@ class PumpFunDetector {
           via: 'poll',
         });
       } catch (err) {
-        console.warn(`[launchpad-detector] poll handle ${s.signature}:`, err.message);
+        if (/429|Too Many|rate limit/i.test(err.message)) throw err;
+        console.warn(`[launchpad-detector] poll handle:`, err.message.slice(0, 120));
       }
     }
   }

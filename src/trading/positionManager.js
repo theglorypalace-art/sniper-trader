@@ -17,7 +17,7 @@ const telegram = require('../telegram/bot');
 
 const openPositions = new Map(); // mint -> position state
 let lastEntryAttemptAt = 0;
-const ENTRY_COOLDOWN_MS = Number(process.env.ENTRY_COOLDOWN_MS || 15000); // min gap between buy attempts
+const ENTRY_COOLDOWN_MS = Number(process.env.ENTRY_COOLDOWN_MS || 3000); // only after a real buy attempt
 
 function printFindings(mint, assessment) {
   console.log(`\n[findings] ${mint} (solana)`);
@@ -80,28 +80,23 @@ runtime.registerPositions('solana', () =>
 );
 
 async function tryEnterPosition(mint) {
-  if (openPositions.size >= MAX_CONCURRENT_POSITIONS) {
-    runtime.recordSkip('solana', 'already holding a position (max concurrent reached)');
-    console.log(`[position] skipping ${mint} — already at MAX_CONCURRENT_POSITIONS (${MAX_CONCURRENT_POSITIONS})`);
+  // Serial mode: finish the open trade (buy→monitor→sell) before evaluating the next.
+  if (openPositions.size > 0) {
+    // Quiet skip — expected while a position is open (do not inflate scanner spam).
     return;
   }
-  if (entering + openPositions.size >= MAX_CONCURRENT_POSITIONS) {
-    runtime.recordSkip('solana', 'busy evaluating another candidate that arrived first');
-    console.log(`[position] skipping ${mint} — already evaluating another candidate (MAX_CONCURRENT_POSITIONS=${MAX_CONCURRENT_POSITIONS})`);
+  if (entering > 0) {
+    // Already assessing/buying one candidate — ignore the rest until done.
     return;
   }
   if (openPositions.has(mint)) return;
 
-  // Cool down between buy attempts to stop spam of failed portal trades
   const since = Date.now() - lastEntryAttemptAt;
   if (lastEntryAttemptAt && since < ENTRY_COOLDOWN_MS) {
-    runtime.recordSkip('solana', 'entry cooldown');
-    console.log(`[position] skipping ${mint} — entry cooldown (${Math.ceil((ENTRY_COOLDOWN_MS - since) / 1000)}s left)`);
-    return;
+    return; // short quiet gap after last buy attempt only
   }
 
   entering += 1;
-  lastEntryAttemptAt = Date.now();
   try {
     await enterPosition(mint);
   } finally {
@@ -135,46 +130,45 @@ async function enterPosition(mint) {
   stateSync.recordAssessment({ ...assessment, chain: 'solana', address: mint });
   runtime.recordAssessed('solana', mint, assessment);
 
-  // Pre-migration: no Jupiter route. Buy on bonding curve only if it would
-  // have been recommended (or we explicitly promote it with a daily slot).
-  const onCurve = Boolean(assessment.pendingGraduation);
   const liveCfg = getConfig();
+  if (liveCfg.paused || !liveCfg.enableSolana) {
+    if (assessment.pendingGraduation) graduationWatcher.watch(mint, assessment);
+    return;
+  }
 
-  if (onCurve && !assessment.recommended) {
-    if (liveCfg.paused || !liveCfg.enableSolana) {
-      console.log(`[position] ${mint} on curve — paused/off, watch only`);
-      graduationWatcher.watch(mint, assessment);
-      return;
-    }
-    // Promote to buy only if a daily slot is available (same selectivity as post-migration)
+  // Hard unsafe (freeze, ownership gates, etc.) — never buy.
+  if (assessment.verdict === 'UNSAFE' && !assessment.pendingGraduation) {
+    return;
+  }
+
+  // Score ceiling from Telegram (maxRiskScore).
+  const maxScore = liveCfg.maxRiskScore ?? 100;
+  if (Number(assessment.score) > maxScore) {
+    console.log(`[position] ${mint} score ${assessment.score} > max ${maxScore} — skip`);
+    return;
+  }
+
+  // Promote curve / passed tokens to a real buy (one serial slot).
+  const onCurve = Boolean(assessment.pendingGraduation) || assessment.migrated === false;
+  if (!assessment.recommended) {
     const { tryConsumeDailySlot } = require('../analysis/dailyLimiter');
     const gotSlot = tryConsumeDailySlot(liveCfg.maxTokensPerDay);
     if (!gotSlot) {
-      console.log(`[position] ${mint} on curve but daily quota full — not buying`);
+      console.log(`[position] ${mint} daily quota full — not buying`);
       runtime.recordSkip('solana', 'daily quota full');
+      if (onCurve) graduationWatcher.watch(mint, assessment);
       return;
     }
     assessment.recommended = true;
     assessment.reasons = [
       ...(assessment.reasons || []),
-      'Buying on pump.fun bonding curve (no Jupiter route until migration).',
+      onCurve
+        ? 'Serial entry: buying on pump bonding curve (no Jupiter route yet).'
+        : 'Serial entry: passed score/safety gates — taking the trade.',
     ];
   }
 
-  if (!assessment.recommended) return;
-
-  if (liveCfg.paused) {
-    console.log(`[position] ${mint} recommended but paused — skip`);
-    runtime.recordSkip('solana', 'trading paused / chain off');
-    return;
-  }
-  if (!liveCfg.enableSolana) {
-    console.log(`[position] ${mint} recommended but Solana off — skip`);
-    runtime.recordSkip('solana', 'trading paused / chain off');
-    return;
-  }
-
-  // Notify only when we actually attempt a buy (not every assessment)
+  lastEntryAttemptAt = Date.now(); // cooldown starts only when we actually try to buy
   await buyAndTrack(mint, assessment, liveCfg, {
     preferPump: onCurve || assessment.category === 'new' || assessment.migrated === false,
   });

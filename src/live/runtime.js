@@ -76,13 +76,15 @@ function recordLaunch(chain) {
 
 // Groups the free-text rejection reasons into a few readable buckets.
 function classifyReject(assessment) {
-  const r = String((assessment.reasons && assessment.reasons[0]) || '');
-  if (assessment.verdict !== 'UNSAFE') return `risk too high (${assessment.verdict})`;
+  const r = String((assessment.reasons && assessment.reasons[0]) || assessment.reasons && assessment.reasons.join(' ') || '');
   if (/no sell route|honeypot/i.test(r)) return 'no sell route / honeypot';
   if (/freeze authority/i.test(r)) return 'freeze authority active';
+  if (/mint authority/i.test(r)) return 'mint authority active';
+  if (/market cap/i.test(r)) return 'market cap below min';
   if (/(creator|dev|owner).*(hold|wallet)/i.test(r)) return 'dev holding over limit';
-  if (/top 10/i.test(r)) return 'top-10 holding over limit';
-  return 'other red flag';
+  if (/top 10|top holders|single holder/i.test(r)) return 'holder concentration';
+  if (assessment.verdict === 'UNSAFE') return 'other red flag';
+  return `not entered (${assessment.verdict})`;
 }
 
 const BLOCK_LABELS = {
@@ -98,13 +100,7 @@ function recordAssessed(chain, address, a) {
   const b = bucket(chain);
   b.assessed += 1;
 
-  if (a.pendingGraduation) {
-    // Not a rejection — it passed everything except "is it tradeable yet".
-    // The graduation watcher (src/pumpfun/graduationWatcher.js) owns its
-    // own counters for what happens to it next.
-  } else if (!a.tradeable) {
-    bump(c.rejects, classifyReject(a));
-  } else {
+  if (a.pendingGraduation || a.tradeable) {
     c.totals.passed += 1;
     b.passed += 1;
     if (a.recommended) {
@@ -113,6 +109,8 @@ function recordAssessed(chain, address, a) {
     } else if (a.blockedBy) {
       bump(c.skips, BLOCK_LABELS[a.blockedBy] || a.blockedBy);
     }
+  } else {
+    bump(c.rejects, classifyReject(a));
   }
 
   recent.unshift({

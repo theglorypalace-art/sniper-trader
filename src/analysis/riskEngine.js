@@ -281,15 +281,19 @@ async function assessSolanaToken(mint, { requireSellable = true } = {}) {
 
   if (sellable) return finalized;
 
-  if (migrated === false && !requireSellable) {
-    // Everything else about this token passed — it just isn't tradeable
-    // yet because its bonding curve hasn't migrated to a real pool. Hand it
-    // to the graduation watcher instead of discarding it.
+  // No Jupiter route: if still on curve (or curve state unknown), treat as
+  // pre-migration so the bot can buy via PumpPortal instead of hard-rejecting.
+  if (!requireSellable && migrated !== true) {
     return {
       ...finalized,
       tradeable: false,
       pendingGraduation: true,
-      reasons: [...finalized.reasons, 'No swap route yet — bonding curve has not migrated. Watching for graduation.'],
+      reasons: [
+        ...finalized.reasons,
+        migrated === false
+          ? 'No swap route yet — on bonding curve. Eligible for pump buy / graduation watch.'
+          : 'No Jupiter route and curve state unknown — treating as pre-migration (pump buy path).',
+      ],
     };
   }
 
@@ -477,12 +481,12 @@ async function assessBscToken(address) {
 // up-to-the-minute settings and daily-quota state — after its own final
 // sellability recheck, without re-running the full (expensive) assessment.
 function gateAssessment(assessment, cfg, { consumeSlot = true } = {}) {
-  if (!assessment.tradeable) {
-    assessment.blockedBy = assessment.pendingGraduation ? 'pendingGraduation' : 'unsafe';
+  // Hard unsafe only — pendingGraduation is allowed through for pump buys.
+  if (!assessment.tradeable && !assessment.pendingGraduation) {
+    assessment.blockedBy = 'unsafe';
     return assessment;
   }
 
-  // Aggressive mode: do not block on tier. Only optional score ceiling (default 100 = allow all).
   const maxScore = cfg.maxRiskScore ?? 100;
   if (assessment.score > maxScore) {
     assessment.reasons.push(`Risk score ${assessment.score} is above your entry limit of ${maxScore}.`);
@@ -490,12 +494,8 @@ function gateAssessment(assessment, cfg, { consumeSlot = true } = {}) {
     return assessment;
   }
 
-  // While paused (or the chain is switched off) the token is still fully
-  // assessed and reported, but it must NOT use up one of today's slots —
-  // otherwise a paused bot would silently burn its daily quota on tokens it
-  // was never going to buy.
   if (!consumeSlot) {
-    assessment.reasons.push('Passed every check, but trading is paused or this chain is off — not counted toward the daily limit.');
+    assessment.reasons.push('Passed checks, but trading is paused or chain off — not counted toward daily limit.');
     assessment.blockedBy = 'paused';
     return assessment;
   }
@@ -503,7 +503,7 @@ function gateAssessment(assessment, cfg, { consumeSlot = true } = {}) {
   const gotSlot = tryConsumeDailySlot(cfg.maxTokensPerDay);
   assessment.recommended = gotSlot;
   if (!gotSlot) {
-    assessment.reasons.push(`Passed the safety filter, but today's ${cfg.maxTokensPerDay}-token quota is already used.`);
+    assessment.reasons.push(`Passed safety, but today's ${cfg.maxTokensPerDay}-token quota is already used.`);
     assessment.blockedBy = 'quota';
   }
   return assessment;

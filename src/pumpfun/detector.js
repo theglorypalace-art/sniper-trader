@@ -1,7 +1,7 @@
 const WebSocket = require('ws');
 const { PublicKey } = require('@solana/web3.js');
-const { HELIUS_WSS_URL, PUMPFUN_PROGRAM_ID } = require('../config');
-const { getConnection } = require('../solana/wallet');
+const { HELIUS_WSS_URL, SOLANA_WSS_URL, SOLANA_WSS_FALLBACK, PUMPFUN_PROGRAM_ID } = require('../config');
+const { getConnection, noteRpc429 } = require('../solana/wallet');
 const runtime = require('../live/runtime');
 const { LAUNCHPADS, matchLaunchpad, enabledLaunchpads } = require('./launchpads');
 const { getConfig } = require('../live/liveConfig');
@@ -10,10 +10,12 @@ const { getConfig } = require('../live/liveConfig');
 const STALL_MS = Number(process.env.DETECTOR_STALL_MS || 180000);
 const CONNECT_TIMEOUT_MS = 20000;
 // Poll is a FALLBACK only — keep sparse to avoid Helius 429s.
-const POLL_MS = Number(process.env.DETECTOR_POLL_MS || 60000);
-const PING_MS = 45000;
-const POLL_SIG_LIMIT = Number(process.env.DETECTOR_POLL_SIG_LIMIT || 5);
-const POLL_TX_BUDGET = Number(process.env.DETECTOR_POLL_TX_BUDGET || 2); // max getParsedTransaction per cycle
+const POLL_MS = Number(process.env.DETECTOR_POLL_MS || 90000);
+const PING_MS = 60000;
+const POLL_SIG_LIMIT = Number(process.env.DETECTOR_POLL_SIG_LIMIT || 3);
+const POLL_TX_BUDGET = Number(process.env.DETECTOR_POLL_TX_BUDGET || 1);
+const MAX_RECONNECT_MS = Number(process.env.DETECTOR_MAX_RECONNECT_MS || 300000); // 5 min
+const RATE_LIMIT_PAUSE_MS = Number(process.env.DETECTOR_429_PAUSE_MS || 300000); // 5 min on 429
 
 
 async function resolveLaunchedMint(signature) {
@@ -37,15 +39,23 @@ function looksLikeCreate(logs) {
   );
 }
 
+function wssUrlList() {
+  const list = [];
+  if (SOLANA_WSS_URL) list.push(SOLANA_WSS_URL);
+  if (HELIUS_WSS_URL && !String(HELIUS_WSS_URL).endsWith('api-key=')) list.push(HELIUS_WSS_URL);
+  if (SOLANA_WSS_FALLBACK) list.push(SOLANA_WSS_FALLBACK);
+  return [...new Set(list.filter(Boolean))];
+}
+
 /**
  * Multi-launchpad detector: WebSocket logsSubscribe + RPC poll fallback.
- * Poll keeps finding pump creates even when WSS flaps.
+ * Heavy 429 backoff — never reconnect-storm when Helius quota is exhausted.
  */
 class PumpFunDetector {
   constructor(onLaunch) {
     this.onLaunch = onLaunch;
     this.ws = null;
-    this.reconnectDelayMs = 1000;
+    this.reconnectDelayMs = 5000;
     this.lastMsgAt = Date.now();
     this.connectStartedAt = Date.now();
     this.watchdog = null;
@@ -57,6 +67,9 @@ class PumpFunDetector {
     this.subReqToProgram = new Map();
     this.nextReqId = 1;
     this._closedOnPurpose = false;
+    this._wssIndex = 0;
+    this._rateLimitedUntil = 0;
+    this._consecutive429 = 0;
   }
 
   touch() {
@@ -134,8 +147,8 @@ class PumpFunDetector {
       } catch (err) {
         const msg = String(err.message || err);
         if (/429|Too Many|rate limit/i.test(msg)) {
-          this._pollBackoffUntil = Date.now() + 120000;
-          console.warn('[launchpad-detector] RPC 429 — pausing poll 2 minutes');
+          this.mark429('poll');
+          this._pollBackoffUntil = this._rateLimitedUntil;
         } else {
           console.warn('[launchpad-detector] poll error:', msg.slice(0, 200));
         }
@@ -203,11 +216,32 @@ class PumpFunDetector {
     }
   }
 
-  scheduleReconnect() {
+  scheduleReconnect(reason) {
     if (this.starting) return;
     runtime.setDetector('solana', 'reconnecting');
-    setTimeout(() => this.start(), this.reconnectDelayMs);
-    this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, 30000);
+    let delay = this.reconnectDelayMs;
+    if (Date.now() < this._rateLimitedUntil) {
+      delay = Math.max(delay, this._rateLimitedUntil - Date.now());
+    }
+    console.warn(
+      `[launchpad-detector] reconnect in ${Math.round(delay / 1000)}s` +
+        (reason ? ` (${reason})` : '')
+    );
+    setTimeout(() => this.start(), delay);
+    this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, MAX_RECONNECT_MS);
+  }
+
+  mark429(where) {
+    this._consecutive429 += 1;
+    const pause = Math.min(RATE_LIMIT_PAUSE_MS * Math.min(this._consecutive429, 3), 15 * 60 * 1000);
+    this._rateLimitedUntil = Date.now() + pause;
+    this.reconnectDelayMs = Math.max(this.reconnectDelayMs, pause);
+    try { noteRpc429(); } catch (_) {}
+    // Rotate WSS endpoint after repeated 429
+    this._wssIndex += 1;
+    console.warn(
+      `[launchpad-detector] 429 at ${where} — pause ${Math.round(pause / 1000)}s, try next WSS (idx ${this._wssIndex})`
+    );
   }
 
   start() {
@@ -232,10 +266,21 @@ class PumpFunDetector {
       this.subReqToProgram.clear();
       this.nextReqId = 1;
 
-      const url = String(HELIUS_WSS_URL || '').trim();
-      if (!url || url.includes('api-key=') && url.endsWith('api-key=')) {
-        console.error('[launchpad-detector] HELIUS_API_KEY missing or empty — WSS cannot connect. Poll may still work if RPC key is set.');
+      if (Date.now() < this._rateLimitedUntil) {
+        this.starting = false;
+        this.scheduleReconnect('still in 429 cooldown');
+        return;
       }
+
+      const urls = wssUrlList();
+      if (!urls.length) {
+        console.error('[launchpad-detector] no WSS URL configured');
+        this.starting = false;
+        this.scheduleReconnect('no wss url');
+        return;
+      }
+      const url = urls[this._wssIndex % urls.length];
+      console.log(`[launchpad-detector] connecting WSS …${url.replace(/api-key=[^&]+/, 'api-key=***').slice(0, 60)}`);
 
       this.ws = new WebSocket(url);
       this.startWatchdog();
@@ -244,7 +289,8 @@ class PumpFunDetector {
 
       this.ws.on('open', () => {
         this.starting = false;
-        this.reconnectDelayMs = 1000;
+        this.reconnectDelayMs = 5000;
+        this._consecutive429 = 0;
         this.touch();
         runtime.setDetector('solana', 'connected');
 
@@ -330,13 +376,20 @@ class PumpFunDetector {
         this.ws = null;
         if (this._closedOnPurpose) {
           this._closedOnPurpose = false;
-          return; // scheduleReconnect already called
+          return;
         }
-        this.scheduleReconnect();
+        // code 1006 right after 429 responses — treat as rate limit when recent
+        if (Date.now() < this._rateLimitedUntil || this._consecutive429 > 0) {
+          this.scheduleReconnect('rate-limited');
+        } else {
+          this.scheduleReconnect('socket closed');
+        }
       });
 
       this.ws.on('error', (err) => {
-        console.error('[launchpad-detector] WSS error:', err.message);
+        const msg = String(err && err.message || err);
+        console.error('[launchpad-detector] WSS error:', msg.slice(0, 200));
+        if (/429|Too Many|rate/i.test(msg)) this.mark429('wss');
       });
     } catch (err) {
       this.starting = false;

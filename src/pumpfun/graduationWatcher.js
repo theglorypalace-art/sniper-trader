@@ -12,10 +12,10 @@
 const { getBondingCurveState } = require('../analysis/pumpfunCurve');
 const runtime = require('../live/runtime');
 
-const POLL_MS = Number(process.env.GRADUATION_POLL_MS || 4000);
+const POLL_MS = Number(process.env.GRADUATION_POLL_MS || 15000);
 const MAX_WATCHLIST = Number(process.env.GRADUATION_WATCHLIST_MAX || 60);
 const WATCH_TIMEOUT_MS = Number(process.env.GRADUATION_WATCH_TIMEOUT_MS || 45 * 60 * 1000);
-const CHECK_BATCH_SIZE = Number(process.env.GRADUATION_CHECK_BATCH_SIZE || 10); // curve-state RPC calls per tick
+const CHECK_BATCH_SIZE = Number(process.env.GRADUATION_CHECK_BATCH_SIZE || 3); // curve-state RPC calls per tick
 
 const watchlist = new Map(); // mint -> { assessment, addedAt, checking }
 let onGraduated = null; // (mint, assessment) => Promise<void>, set by start()

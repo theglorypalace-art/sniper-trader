@@ -21,6 +21,11 @@ module.exports = {
   HELIUS_API_KEY: ENABLE_SOLANA ? required('HELIUS_API_KEY') : process.env.HELIUS_API_KEY || null,
   HELIUS_RPC_URL: `https://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY || ''}`,
   HELIUS_WSS_URL: `wss://mainnet.helius-rpc.com/?api-key=${process.env.HELIUS_API_KEY || ''}`,
+  // Optional overrides / free fallbacks when Helius hits 429 max usage
+  SOLANA_RPC_URL: process.env.SOLANA_RPC_URL || '',
+  SOLANA_WSS_URL: process.env.SOLANA_WSS_URL || '',
+  SOLANA_RPC_FALLBACK: process.env.SOLANA_RPC_FALLBACK || 'https://solana-rpc.publicnode.com',
+  SOLANA_WSS_FALLBACK: process.env.SOLANA_WSS_FALLBACK || 'wss://solana-rpc.publicnode.com',
 
   // Base58-encoded Solana private key for the DEDICATED bot wallet.
   // Required only when DRY_RUN=false. Never use your main wallet's key.

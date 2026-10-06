@@ -11,7 +11,7 @@ const { getConnection, loadWallet } = require('../solana/wallet');
 const TRADE_LOCAL_URL = process.env.PUMPPORTAL_TRADE_URL || 'https://pumpportal.fun/api/trade-local';
 
 // Exit sells use higher slippage so TP/SL actually fill in thin curve liquidity.
-const EXIT_SLIPPAGE_PCT = Number(process.env.EXIT_SLIPPAGE_PCT || 25);
+const EXIT_SLIPPAGE_PCT = Number(process.env.EXIT_SLIPPAGE_PCT || 40);
 
 function priorityFeeSol() {
   const lamports = Number(PRIORITY_FEE_LAMPORTS || 100000);
@@ -129,17 +129,24 @@ async function portalTrade({ action, mint, amount, denominatedInSol, slippage })
   return { tx, wallet };
 }
 
-async function sendSigned(tx, wallet) {
+async function sendSigned(tx, wallet, opts = {}) {
   if (DRY_RUN) {
     return { dryRun: true, signature: null };
   }
   tx.sign([wallet]);
   const connection = getConnection();
+  const skipPreflight = opts.skipPreflight === true;
   const signature = await connection.sendTransaction(tx, {
-    skipPreflight: false,
-    maxRetries: 3,
+    skipPreflight,
+    maxRetries: 5,
+    preflightCommitment: 'confirmed',
   });
-  await connection.confirmTransaction(signature, 'confirmed');
+  // Don't hang forever on confirm — still return sig so we can re-check balance
+  try {
+    await connection.confirmTransaction(signature, 'confirmed');
+  } catch (err) {
+    console.warn(`[pumpPortal] confirm soft-fail ${signature}: ${err.message}`);
+  }
   return { dryRun: false, signature };
 }
 
@@ -262,12 +269,24 @@ async function sellOnPump(mint, tokenAmountRaw, opts = {}) {
     return { dryRun: true, signature: null, via: 'pumpPortal', quote: null };
   }
 
-  // Re-read balance every attempt — RPC lag caused many false SellZeroAmount.
+  const slip = Math.min(99, Math.max(15, Number(opts.slippage) || EXIT_SLIPPAGE_PCT));
+  const pools = opts.pool ? [opts.pool] : ['auto', 'pump', 'raydium'];
+
+  // Balance: prefer live chain, fall back to known raw from buy
   let bal = 0n;
-  for (let i = 0; i < 4; i += 1) {
-    bal = await getTokenBalanceRaw(mint);
-    if (bal > 0n) break;
-    await new Promise((r) => setTimeout(r, 700 + i * 400));
+  for (let i = 0; i < 3; i += 1) {
+    try {
+      bal = await getTokenBalanceRaw(mint);
+      if (bal > 0n) break;
+    } catch (_) {}
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  const known = tokenAmountRaw != null && String(tokenAmountRaw) !== '' && String(tokenAmountRaw) !== '0'
+    ? BigInt(String(tokenAmountRaw).split('.')[0])
+    : 0n;
+  if (bal === 0n && known > 0n) {
+    console.warn(`[pumpPortal] balance RPC 0 — selling known amount ${known.toString()} from entry`);
+    bal = known;
   }
   if (bal === 0n) {
     const err = new Error('SellZeroAmount: wallet holds 0 tokens for this mint — nothing to sell');
@@ -275,18 +294,57 @@ async function sellOnPump(mint, tokenAmountRaw, opts = {}) {
     throw err;
   }
 
-  const slip = Math.min(99, Math.max(10, Number(opts.slippage) || EXIT_SLIPPAGE_PCT));
-  // Always sell 100% of wallet holdings for this mint (never stale partial amount).
-  const { tx, wallet } = await portalTrade({
-    action: 'sell',
-    mint,
-    amount: '100%',
-    denominatedInSol: false,
-    slippage: slip,
-  });
-  const sent = await sendSigned(tx, wallet);
-  console.log(`[pumpPortal] sold 100% of ${mint} (had ${bal.toString()} raw, slip ${slip}%) sig=${sent.signature}`);
-  return { ...sent, via: 'pumpPortal', quote: null, soldRaw: bal.toString() };
+  let lastErr = null;
+  for (const pool of pools) {
+    try {
+      // Prefer exact raw amount first (more reliable than 100% when ATA lag)
+      const amountExact = bal.toString();
+      for (const amount of [amountExact, '100%']) {
+        try {
+          const bodyWallet = loadWallet();
+          const body = {
+            publicKey: bodyWallet.publicKey.toBase58(),
+            action: 'sell',
+            mint,
+            amount,
+            denominatedInSol: 'false',
+            slippage: slip,
+            priorityFee: priorityFeeSol(),
+            pool,
+          };
+          const res = await fetch(TRADE_LOCAL_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+          });
+          if (!res.ok) {
+            const text = await res.text();
+            throw new Error(`PumpPortal trade-local failed (${res.status}): ${text.slice(0, 280)}`);
+          }
+          const contentType = res.headers.get('content-type') || '';
+          let tx;
+          if (contentType.includes('application/json')) {
+            const j = await res.json();
+            if (j.error || j.errors) throw new Error(`PumpPortal: ${JSON.stringify(j.error || j.errors)}`);
+            if (!j.transaction) throw new Error(`PumpPortal unexpected JSON`);
+            tx = VersionedTransaction.deserialize(Buffer.from(j.transaction, 'base64'));
+          } else {
+            tx = VersionedTransaction.deserialize(Buffer.from(await res.arrayBuffer()));
+          }
+          // skipPreflight so simulation SellZero / slippage does not block broadcast
+          const sent = await sendSigned(tx, bodyWallet, { skipPreflight: true });
+          console.log(`[pumpPortal] SOLD ${mint} amount=${amount} pool=${pool} slip=${slip}% sig=${sent.signature}`);
+          return { ...sent, via: 'pumpPortal', quote: null, soldRaw: bal.toString() };
+        } catch (err) {
+          lastErr = err;
+          console.warn(`[pumpPortal] sell try amount=${amount} pool=${pool}: ${err.message}`);
+        }
+      }
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error('sellOnPump: all pool/amount attempts failed');
 }
 
 module.exports = { buyOnPump, sellOnPump, getTokenBalanceRaw, portalTrade };

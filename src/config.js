@@ -79,7 +79,7 @@ module.exports = {
   TAKE_PROFIT_PCT: Number(process.env.TAKE_PROFIT_PCT || 25),
   STOP_LOSS_PCT: process.env.STOP_LOSS_PCT != null ? Number(process.env.STOP_LOSS_PCT) : -50,
   MAX_POSITION_AGE_MS: Number(process.env.MAX_POSITION_AGE_MS || 30 * 60 * 1000),
-  PRICE_POLL_INTERVAL_MS: Number(process.env.PRICE_POLL_INTERVAL_MS || 4000),
+  PRICE_POLL_INTERVAL_MS: Number(process.env.PRICE_POLL_INTERVAL_MS || 3000),
 
   // How selective the scanner is — max tokens recommended/traded per UTC day.
   // (Fallback only if Supabase isn't configured — see src/live/liveConfig.js.)

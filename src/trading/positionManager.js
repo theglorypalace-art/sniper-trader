@@ -457,7 +457,7 @@ async function exitPosition(mint, reason, pnlPct) {
     try {
       // Always try full wallet sell via PumpPortal first (curve + thin pools).
       try {
-        sellResult = await sellOnPump(mint, null, { slippage: slip });
+        sellResult = await sellOnPump(mint, position.tokenAmountRaw, { slippage: slip });
         if (!sellResult.quote) sellResult.quote = null;
       } catch (pumpErr) {
         if (pumpErr.code === 'SELL_ZERO' || /SellZeroAmount|0x1786/i.test(pumpErr.message || '')) {
@@ -498,28 +498,48 @@ async function exitPosition(mint, reason, pnlPct) {
       (lastErr && lastErr.code === 'SELL_ZERO') ||
       /SellZeroAmount|sell zero|holds 0 tokens|0x1786/i.test(msg);
 
-    if (isZero) {
+    // NEVER drop tracking while we still have a known token amount from the buy —
+    // RPC lag / Helius 429 often reports 0 falsely and that left users stuck.
+    const hasKnown = position.tokenAmountRaw && String(position.tokenAmountRaw) !== '0';
+    if (isZero && !hasKnown && (position.sellFailures || 0) >= 5) {
       openPositions.delete(mint);
       logTrade({ mint, chain: 'solana', event: 'sell_abandoned', error: msg, reason });
-      runtime.recordSkip('solana', 'sell zero amount — abandoned');
       telegram.notify(
-        `⚠️ CLOSED tracking ${mint.slice(0, 12)}… — wallet shows 0 tokens (${reason}).\n` +
-          `If you still see tokens in the wallet, sell manually on pump.fun / Jupiter.`
+        `⚠️ STOPPED tracking ${mint}\nWallet repeatedly shows 0 tokens after buy.\n` +
+          `Double-check the wallet manually and sell on pump.fun if tokens remain.`
       );
       return;
     }
 
-    // Keep holding and retry soon — never silent-stuck
     position.exiting = false;
     position.sellFailures = (position.sellFailures || 0) + 1;
-    position.nextExitAt = Date.now() + Math.min(20000, 4000 * position.sellFailures);
+    // Retry fast — stuck bags are dangerous
+    position.nextExitAt = Date.now() + (isZero ? 3000 : 5000);
     logTrade({ mint, chain: 'solana', event: 'sell_failed', error: msg, reason });
-    telegram.notify(
-      `⚠️ SELL FAILED ${mint.slice(0, 12)}… (${reason}) try ${position.sellFailures}: ${msg.slice(0, 180)}\n` +
-        `Still holding — retry in ~${Math.round((position.nextExitAt - Date.now()) / 1000)}s with higher slippage.`
-    );
+    if (position.sellFailures <= 3 || position.sellFailures % 3 === 0) {
+      telegram.notify(
+        `⚠️ SELL FAILED ${mint.slice(0, 12)}… (${reason}) #${position.sellFailures}: ${msg.slice(0, 160)}\n` +
+          `Still holding — forced retry in a few seconds.`
+      );
+    }
     return;
   }
+
+  // Confirm tokens left the wallet; if not, keep retrying
+  try {
+    const { getTokenBalanceRaw } = require('./pumpPortal');
+    await sleep(1500);
+    const left = await getTokenBalanceRaw(mint);
+    if (left > 0n && !sellResult.dryRun) {
+      console.warn(`[position] sell sig ok but still holding ${left} — will retry`);
+      position.exiting = false;
+      position.sellFailures = (position.sellFailures || 0) + 1;
+      position.nextExitAt = Date.now() + 4000;
+      position.tokenAmountRaw = left.toString();
+      telegram.notify(`⚠️ Sell sent but still holding ${mint.slice(0, 12)}… — retrying`);
+      return;
+    }
+  } catch (_) {}
 
   openPositions.delete(mint);
 

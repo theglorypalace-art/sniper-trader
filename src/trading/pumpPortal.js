@@ -256,29 +256,36 @@ async function buyOnPump(mint, solAmount) {
  * Always sell 100% of wallet holdings for this mint when amount unknown/zero.
  * Uses elevated exit slippage so TP/SL fills on thin curve books.
  */
-async function sellOnPump(mint, tokenAmountRaw) {
+async function sellOnPump(mint, tokenAmountRaw, opts = {}) {
   if (DRY_RUN) {
     console.log(`[pumpPortal] [DRY RUN] would sell 100% of ${mint}`);
     return { dryRun: true, signature: null, via: 'pumpPortal', quote: null };
   }
 
-  const bal = await getTokenBalanceRaw(mint);
+  // Re-read balance every attempt — RPC lag caused many false SellZeroAmount.
+  let bal = 0n;
+  for (let i = 0; i < 4; i += 1) {
+    bal = await getTokenBalanceRaw(mint);
+    if (bal > 0n) break;
+    await new Promise((r) => setTimeout(r, 700 + i * 400));
+  }
   if (bal === 0n) {
     const err = new Error('SellZeroAmount: wallet holds 0 tokens for this mint — nothing to sell');
     err.code = 'SELL_ZERO';
     throw err;
   }
 
-  // Prefer "100%" so we never pass a stale/wrong raw amount that underflows to 0.
+  const slip = Math.min(99, Math.max(10, Number(opts.slippage) || EXIT_SLIPPAGE_PCT));
+  // Always sell 100% of wallet holdings for this mint (never stale partial amount).
   const { tx, wallet } = await portalTrade({
     action: 'sell',
     mint,
     amount: '100%',
     denominatedInSol: false,
-    slippage: EXIT_SLIPPAGE_PCT,
+    slippage: slip,
   });
   const sent = await sendSigned(tx, wallet);
-  console.log(`[pumpPortal] sold 100% of ${mint} (had ${bal.toString()} raw) sig=${sent.signature}`);
+  console.log(`[pumpPortal] sold 100% of ${mint} (had ${bal.toString()} raw, slip ${slip}%) sig=${sent.signature}`);
   return { ...sent, via: 'pumpPortal', quote: null, soldRaw: bal.toString() };
 }
 

@@ -53,8 +53,12 @@ function findingsMessage(mint, assessment) {
   return lines.join('\n');
 }
 
-const SELL_ATTEMPTS = Number(process.env.SELL_ATTEMPTS || 3);
-const SELL_RETRY_BASE_MS = Number(process.env.SELL_RETRY_BASE_MS || 1500);
+const SELL_ATTEMPTS = Number(process.env.SELL_ATTEMPTS || 6);
+const SELL_RETRY_BASE_MS = Number(process.env.SELL_RETRY_BASE_MS || 1200);
+const SELL_SLIP_LADDER = String(process.env.SELL_SLIP_LADDER || '25,35,45,55,65,75')
+  .split(',')
+  .map((x) => Number(x.trim()))
+  .filter((n) => Number.isFinite(n) && n > 0);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 let entering = 0; // entries in flight (assessing/buying) — counted against the position limit
@@ -417,8 +421,12 @@ function monitorPosition(mint) {
       position.lastPolledAt = Date.now();
 
       const rules = resolveExit(position.exit, getConfig());
-      const reason = evaluateExit({ pnlPct, ageMs, rules });
-      if (reason && Date.now() >= position.nextExitAt) {
+      let reason = evaluateExit({ pnlPct, ageMs, rules });
+      // If a previous sell failed, keep forcing exit with last reason
+      if (!reason && position.sellFailures > 0 && position.lastExitReason) {
+        reason = position.lastExitReason;
+      }
+      if (reason && Date.now() >= (position.nextExitAt || 0)) {
         await exitPosition(mint, reason, pnlPct);
       }
     } catch (err) {
@@ -433,32 +441,51 @@ async function exitPosition(mint, reason, pnlPct) {
   const position = openPositions.get(mint);
   if (!position || position.exiting) return;
   position.exiting = true;
+  position.lastExitReason = reason;
+
+  telegram.notify(
+    `⏳ SELLING ${mint.slice(0, 8)}… (${reason}) — attempting exit now`
+  );
 
   const wallet = loadWallet();
   let sellResult = null;
   let lastErr = null;
+  const slips = SELL_SLIP_LADDER.length ? SELL_SLIP_LADDER : [25, 40, 55, 70];
+
   for (let attempt = 1; attempt <= SELL_ATTEMPTS; attempt += 1) {
+    const slip = slips[Math.min(attempt - 1, slips.length - 1)];
     try {
-      // Pump positions (and any unknown balance): sell 100% via PumpPortal with high exit slippage.
-      // Jupiter path only when we have a known raw amount and bought via Jupiter.
-      if (position.via === 'pumpPortal' || !position.tokenAmountRaw) {
-        sellResult = await sellOnPump(mint, position.tokenAmountRaw);
+      // Always try full wallet sell via PumpPortal first (curve + thin pools).
+      try {
+        sellResult = await sellOnPump(mint, null, { slippage: slip });
         if (!sellResult.quote) sellResult.quote = null;
-      } else {
-        try {
+      } catch (pumpErr) {
+        if (pumpErr.code === 'SELL_ZERO' || /SellZeroAmount|0x1786/i.test(pumpErr.message || '')) {
+          throw pumpErr;
+        }
+        // Fallback Jupiter if we still know a raw amount
+        if (position.tokenAmountRaw) {
+          console.warn(`[position] Pump sell fail (slip ${slip}%): ${pumpErr.message} — trying Jupiter`);
           sellResult = await sellToSol(mint, position.tokenAmountRaw, wallet);
-        } catch (jupErr) {
-          console.warn(`[position] Jupiter sell failed, trying PumpPortal 100%: ${jupErr.message}`);
-          sellResult = await sellOnPump(mint, null);
-          if (!sellResult.quote) sellResult.quote = null;
+        } else {
+          throw pumpErr;
         }
       }
       break;
     } catch (err) {
       lastErr = err;
-      console.error(`[position] sell attempt ${attempt}/${SELL_ATTEMPTS} failed for ${mint}:`, err.message);
-      // Zero balance: stop retrying immediately
+      console.error(`[position] sell attempt ${attempt}/${SELL_ATTEMPTS} (${slip}% slip) failed for ${mint}:`, err.message);
       if (err.code === 'SELL_ZERO' || /SellZeroAmount|holds 0 tokens|0x1786/i.test(err.message || '')) {
+        // One more balance recheck after delay — RPC lag
+        await sleep(2000);
+        try {
+          const { getTokenBalanceRaw } = require('./pumpPortal');
+          const bal = await getTokenBalanceRaw(mint);
+          if (bal > 0n) {
+            lastErr = null;
+            continue;
+          }
+        } catch (_) {}
         break;
       }
       if (attempt < SELL_ATTEMPTS) await sleep(SELL_RETRY_BASE_MS * attempt);
@@ -466,7 +493,7 @@ async function exitPosition(mint, reason, pnlPct) {
   }
 
   if (!sellResult) {
-    const msg = (lastErr && lastErr.message) || '';
+    const msg = (lastErr && lastErr.message) || 'unknown sell error';
     const isZero =
       (lastErr && lastErr.code === 'SELL_ZERO') ||
       /SellZeroAmount|sell zero|holds 0 tokens|0x1786/i.test(msg);
@@ -475,31 +502,32 @@ async function exitPosition(mint, reason, pnlPct) {
       openPositions.delete(mint);
       logTrade({ mint, chain: 'solana', event: 'sell_abandoned', error: msg, reason });
       runtime.recordSkip('solana', 'sell zero amount — abandoned');
-      // Console only — was spamming Telegram on empty positions
-      console.warn(`[position] abandoned ${mint} (${reason}) — 0 balance, no Telegram spam`);
+      telegram.notify(
+        `⚠️ CLOSED tracking ${mint.slice(0, 12)}… — wallet shows 0 tokens (${reason}).\n` +
+          `If you still see tokens in the wallet, sell manually on pump.fun / Jupiter.`
+      );
       return;
     }
 
-    // Transient failure: keep tracking and retry later.
+    // Keep holding and retry soon — never silent-stuck
     position.exiting = false;
-    position.sellFailures += 1;
-    position.nextExitAt = Date.now() + Math.min(60000, 10000 * position.sellFailures);
+    position.sellFailures = (position.sellFailures || 0) + 1;
+    position.nextExitAt = Date.now() + Math.min(20000, 4000 * position.sellFailures);
     logTrade({ mint, chain: 'solana', event: 'sell_failed', error: msg, reason });
-    if (position.sellFailures === 1 || position.sellFailures % 5 === 0) {
-      telegram.notify(
-        `⚠️ SELL FAILED for ${mint} (${reason}) after ${SELL_ATTEMPTS} tries: ${msg}\n` +
-          `Still holding it — the bot will keep retrying. If it keeps failing, sell manually.`
-      );
-    }
+    telegram.notify(
+      `⚠️ SELL FAILED ${mint.slice(0, 12)}… (${reason}) try ${position.sellFailures}: ${msg.slice(0, 180)}\n` +
+        `Still holding — retry in ~${Math.round((position.nextExitAt - Date.now()) / 1000)}s with higher slippage.`
+    );
     return;
   }
 
   openPositions.delete(mint);
 
-  // Use what the sell actually returned, not the last price poll.
-  const exitSol = sellResult.quote ? Number(sellResult.quote.outAmount) / LAMPORTS_PER_SOL : position.lastValueNative;
+  const exitSol = sellResult.quote
+    ? Number(sellResult.quote.outAmount) / LAMPORTS_PER_SOL
+    : position.lastValueNative || position.sizeSol;
   const pnlSol = exitSol - position.sizeSol;
-  const realizedPct = (pnlSol / position.sizeSol) * 100;
+  const realizedPct = position.sizeSol > 0 ? (pnlSol / position.sizeSol) * 100 : pnlPct || 0;
   const rules = resolveExit(position.exit, getConfig());
 
   console.log(

@@ -124,7 +124,13 @@ function scannerText(cfg, minutes = 60) {
     }
   }
 
-  lines.push('', `Open positions: ${runtime.getOpenPositions().length}`, realizedLine());
+  const openNow = runtime.getOpenPositions();
+  lines.push('', `Open positions: ${openNow.length}`);
+  for (const p of openNow.slice(0, 5)) {
+    lines.push(`  • ${short(p.address)} ${pct(p.pnlPct || 0)} · size ${fmtNative(p.size, p.unit || 'SOL')}`);
+  }
+  if (openNow.length) lines.push('  ( /positions for detail )');
+  lines.push(realizedLine());
   return lines.join('\n');
 }
 

@@ -291,6 +291,7 @@ async function buyAndTrack(mint, assessment, liveCfg, { preferPump = false } = {
     console.warn(`[position] buy returned no tokens for ${mint} — not opening position`);
     logTrade({ mint, chain: 'solana', event: 'buy_failed', error: 'zero tokens after buy' });
     runtime.recordSkip('solana', 'buy filled 0 tokens');
+    telegram.notify(`⚠️ BUY returned 0 tokens for ${mint.slice(0, 12)}… — not tracking. Check wallet / slippage.`);
     return;
   }
 
@@ -343,6 +344,7 @@ async function buyAndTrack(mint, assessment, liveCfg, { preferPump = false } = {
       assessment,
       cfg: liveCfg,
       dryRun: buyResult.dryRun,
+      via,
     })
   );
 

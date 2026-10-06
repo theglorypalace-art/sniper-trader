@@ -8,12 +8,22 @@ const { scannerText, positionsText, heartbeatText, scannerHeadline, balanceText 
 const runtime = require('../live/runtime');
 
 let bot = null;
+// Fallback when TELEGRAM_CHAT_ID is not set: last chat that used the bot.
+let lastNotifyChatId = TELEGRAM_CHAT_ID ? String(TELEGRAM_CHAT_ID) : null;
 
 function getBot() {
   if (!TELEGRAM_BOT_TOKEN) return null;
   if (bot) return bot;
   bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
   return bot;
+}
+
+function rememberChat(chatId) {
+  if (chatId != null) lastNotifyChatId = String(chatId);
+}
+
+function notifyChatId() {
+  return (TELEGRAM_CHAT_ID && String(TELEGRAM_CHAT_ID)) || lastNotifyChatId || null;
 }
 
 // ---------------------------------------------------------------------
@@ -365,7 +375,10 @@ function statusText(cfg) {
     `Risk: score ≤ ${fmt(cfg.maxRiskScore)} | MC ≥ $${fmt(cfg.minMarketCapUsd) || 'off'} | dev ≤ ${fmt(cfg.maxDevPercent)}% | top10 ≤ ${fmt(cfg.maxTop10Percent)}%`,
     '',
     scannerHeadline() || 'Scanner: no chain running',
-    `Open positions: ${runtime.getOpenPositions().length}`,
+    `Open positions: ${runtime.getOpenPositions().length}` +
+      (runtime.getOpenPositions().length
+        ? '\n' + runtime.getOpenPositions().map((p) => `  • ${String(p.address).slice(0, 8)}… ${Number(p.pnlPct || 0).toFixed(1)}% · ${Number(p.size || 0).toFixed(4)} SOL`).join('\n')
+        : ''),
   ];
   return lines.join('\n');
 }
@@ -646,6 +659,13 @@ function start() {
     return;
   }
   console.log('[telegram] bot started (polling mode)');
+  if (TELEGRAM_CHAT_ID) lastNotifyChatId = String(TELEGRAM_CHAT_ID);
+
+  // Remember any authorized chat so buy/sell alerts work even if env CHAT_ID was empty at boot
+  b.on('message', (msg) => {
+    if (msg && msg.chat && isAuthorized(msg.chat.id)) rememberChat(msg.chat.id);
+  });
+
 
   // chatId -> { key, messageId, ts } while waiting for a typed value.
   const pending = new Map();
@@ -861,6 +881,7 @@ b.onText(/^\/cancel\b/i, (msg) => {
 
   // ---- button taps ----
   b.on('callback_query', async (query) => {
+    if (query && query.message && query.message.chat) rememberChat(query.message.chat.id);
     const chatId = query.message.chat.id;
     const messageId = query.message.message_id;
 
@@ -1053,8 +1074,16 @@ b.onText(/^\/cancel\b/i, (msg) => {
 // call even when Telegram isn't configured — it's a no-op then.
 function notify(text) {
   const b = getBot();
-  if (!b || !TELEGRAM_CHAT_ID) return;
-  b.sendMessage(TELEGRAM_CHAT_ID, text).catch((err) => {
+  const chatId = notifyChatId();
+  if (!b) {
+    console.warn('[telegram] notify skipped — bot not started');
+    return;
+  }
+  if (!chatId) {
+    console.warn('[telegram] notify skipped — no TELEGRAM_CHAT_ID and no /start yet. Message was:', String(text).slice(0, 120));
+    return;
+  }
+  b.sendMessage(chatId, text, { disable_web_page_preview: true }).catch((err) => {
     console.error('[telegram] notify failed:', err.message);
   });
 }

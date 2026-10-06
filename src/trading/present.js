@@ -28,15 +28,19 @@ function describeExit(rules) {
   );
 }
 
-function entryMessage({ chainLabel, unit, address, size, capitalPct, balance, assessment, cfg, dryRun }) {
+function entryMessage({ chainLabel, unit, address, size, capitalPct, balance, assessment, cfg, dryRun, via }) {
   const rules = resolveExit(assessment.exit, cfg);
   return [
     `🟢 BOUGHT ${short(address)}${dryRun ? ' (dry run)' : ''}`,
     `CA: ${address}`,
     `${chainLabel} • ${fmtNative(size, unit)} (${Number(capitalPct)}% of ${fmtNative(balance, unit)})`,
     `Risk: ${assessment.verdict} (score ${assessment.score})`,
+    via ? `Route: ${via}` : null,
     describeExit(rules),
-  ].join('\n');
+    '',
+    '📈 Tracked as open position — send /positions for live P&L',
+    'Sells on TP / SL / max hold, then scans for the next trade.',
+  ].filter((x) => x != null).join('\n');
 }
 
 const EXIT_TITLES = {
@@ -56,9 +60,12 @@ function exitMessage({ unit, address, reason, size, exitValue, heldMs, rules, dr
       : `limit was ${fmtDuration(rules.maxHoldMs).replace(/ 00s$/, '')} (${rules.custom.hold ? 'yours' : 'auto'})`;
   return [
     `${EXIT_TITLES[reason] || 'SOLD'} — SOLD ${short(address)}${dryRun ? ' (dry run)' : ''}`,
+    `CA: ${address}`,
     `Entry ${fmtNative(size, unit)} → Exit ${fmtNative(exitValue, unit)}`,
     `P&L ${pct(pnlPct)} (${sign(pnl)}${fmtNative(Math.abs(pnl), unit)})`,
     `Held ${fmtDuration(heldMs)} • ${target}`,
+    '',
+    'Ready for the next token that passes filters.',
   ].join('\n');
 }
 
